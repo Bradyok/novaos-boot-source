@@ -1,0 +1,817 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Tue, 27 Oct 2026 09:52:16 -0400
+Subject: [PATCH] rockchip: rk3399: add the Rigol DHO800/DHO900 and MHO900
+ board
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+NovaOS local patch. The RK3399 main board of Rigol's DHO800/DHO900 and
+MHO900 oscilloscopes, one defconfig per family:
+
+- LPDDR4, 2 channels x 32 bit, 1 rank, 4 GiB: PMUGRF OS_REG2 reads
+  0x32C1F2C1 on these boards, so the TPL uses
+  rk3399-sdram-lpddr4-100.dtsi, the only LPDDR4 timing set in the tree,
+  with CONFIG_RAM_ROCKCHIP_LPDDR4; sdram_rk3399.c detects the rank,
+  column, bank and row counts itself.
+- The SD card on SDMMC0 is the only boot medium; u-boot.itb sits in the
+  card's zero gap at LBA 2048 (SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR=0x800,
+  SPL_PAD_TO=0xf8000), never at the default 0x4000, which is the start
+  of the scope's uboot partition.
+- Console UART2 at 115200; SPL_ATF_NO_PLATFORM_PARAM is off, so BL31
+  takes the same rate from /chosen/stdout-path.
+- Rockusb (2207:330c) on OTG0 for Loader mode; no watchdog, no ADC
+  download key, no Android BCB code (misc offset 0 holds a stale
+  --wipe_all), no saved environment, no network.
+- ROCKCHIP_MASKROM_IMAGE for a RAM boot over USB.
+
+The board code (board/rigol/rigol_rk3399/rigol_rk3399.c) keeps what the
+systems on the card expect of their boot loader:
+- the reboot flag in PMUGRF OS_REG0 is read in
+  rockchip_early_misc_init_r(), before setup_boot_mode() clears it: low
+  byte 1 and 0x1888aaff are Loader, 3 is recovery, everything else (6 and
+  7, the stock "wipe data", included) a normal boot (rigol_bootflag.h);
+- SPL opens UART0 at 1,500,000 baud (GPIO2_C0/C1 only) before it loads
+  U-Boot; on a normal boot U-Boot scans every frame received since then
+  plus RIGOL_RUNSTOP_WINDOW_MS for Run/Stop (FA 08 0C 34 AF or
+  FA 08 00 58 AF), which enters Loader mode;
+- otherwise it sends the power-on-mode frame FA 05 05 0A AF (auto).
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ arch/arm/dts/rk3399-rigol-dho900-u-boot.dtsi |   4 +
+ arch/arm/dts/rk3399-rigol-dho900.dts         |  14 ++
+ arch/arm/dts/rk3399-rigol-mho900-u-boot.dtsi |   4 +
+ arch/arm/dts/rk3399-rigol-mho900.dts         |  16 ++
+ arch/arm/dts/rk3399-rigol-u-boot.dtsi        |  31 +++
+ arch/arm/dts/rk3399-rigol.dtsi               |  71 ++++++
+ arch/arm/mach-rockchip/rk3399/Kconfig        |  12 +
+ board/rigol/rigol_rk3399/Kconfig             |  38 ++++
+ board/rigol/rigol_rk3399/MAINTAINERS         |   9 +
+ board/rigol/rigol_rk3399/Makefile            |   5 +
+ board/rigol/rigol_rk3399/rigol_bootflag.h    |  67 ++++++
+ board/rigol/rigol_rk3399/rigol_rk3399.c      | 217 +++++++++++++++++++
+ configs/rigol-dho900-rk3399_defconfig        |  68 ++++++
+ configs/rigol-mho900-rk3399_defconfig        |  68 ++++++
+ include/configs/rigol_rk3399.h               |  19 ++
+ 15 files changed, 643 insertions(+)
+ create mode 100644 arch/arm/dts/rk3399-rigol-dho900-u-boot.dtsi
+ create mode 100644 arch/arm/dts/rk3399-rigol-dho900.dts
+ create mode 100644 arch/arm/dts/rk3399-rigol-mho900-u-boot.dtsi
+ create mode 100644 arch/arm/dts/rk3399-rigol-mho900.dts
+ create mode 100644 arch/arm/dts/rk3399-rigol-u-boot.dtsi
+ create mode 100644 arch/arm/dts/rk3399-rigol.dtsi
+ create mode 100644 board/rigol/rigol_rk3399/Kconfig
+ create mode 100644 board/rigol/rigol_rk3399/MAINTAINERS
+ create mode 100644 board/rigol/rigol_rk3399/Makefile
+ create mode 100644 board/rigol/rigol_rk3399/rigol_bootflag.h
+ create mode 100644 board/rigol/rigol_rk3399/rigol_rk3399.c
+ create mode 100644 configs/rigol-dho900-rk3399_defconfig
+ create mode 100644 configs/rigol-mho900-rk3399_defconfig
+ create mode 100644 include/configs/rigol_rk3399.h
+
+diff --git a/arch/arm/dts/rk3399-rigol-dho900-u-boot.dtsi b/arch/arm/dts/rk3399-rigol-dho900-u-boot.dtsi
+new file mode 100644
+index 00000000..3bca96cb
+--- /dev/null
++++ b/arch/arm/dts/rk3399-rigol-dho900-u-boot.dtsi
+@@ -0,0 +1,4 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* Copyright (C) 2026 Olympian LED, Inc. */
++
++#include "rk3399-rigol-u-boot.dtsi"
+diff --git a/arch/arm/dts/rk3399-rigol-dho900.dts b/arch/arm/dts/rk3399-rigol-dho900.dts
+new file mode 100644
+index 00000000..ae2075e4
+--- /dev/null
++++ b/arch/arm/dts/rk3399-rigol-dho900.dts
+@@ -0,0 +1,14 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * Rigol DHO800/DHO900 (RK3399): U-Boot's control DT.
++ *
++ * Copyright (C) 2026 Olympian LED, Inc.
++ */
++
++/dts-v1/;
++#include "rk3399-rigol.dtsi"
++
++/ {
++	model = "Rigol DHO800/DHO900 oscilloscope (RK3399)";
++	compatible = "rigol,dho900", "rockchip,rk3399";
++};
+diff --git a/arch/arm/dts/rk3399-rigol-mho900-u-boot.dtsi b/arch/arm/dts/rk3399-rigol-mho900-u-boot.dtsi
+new file mode 100644
+index 00000000..3bca96cb
+--- /dev/null
++++ b/arch/arm/dts/rk3399-rigol-mho900-u-boot.dtsi
+@@ -0,0 +1,4 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* Copyright (C) 2026 Olympian LED, Inc. */
++
++#include "rk3399-rigol-u-boot.dtsi"
+diff --git a/arch/arm/dts/rk3399-rigol-mho900.dts b/arch/arm/dts/rk3399-rigol-mho900.dts
+new file mode 100644
+index 00000000..f6f488f6
+--- /dev/null
++++ b/arch/arm/dts/rk3399-rigol-mho900.dts
+@@ -0,0 +1,16 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * Rigol MHO900 (RK3399): U-Boot's control DT. The MHO differs from the DHO in
++ * pins this loader never drives (GPIO1_C2 is the LMK04826 chip select here,
++ * not a backlight enable).
++ *
++ * Copyright (C) 2026 Olympian LED, Inc.
++ */
++
++/dts-v1/;
++#include "rk3399-rigol.dtsi"
++
++/ {
++	model = "Rigol MHO900 oscilloscope (RK3399)";
++	compatible = "rigol,mho900", "rockchip,rk3399";
++};
+diff --git a/arch/arm/dts/rk3399-rigol-u-boot.dtsi b/arch/arm/dts/rk3399-rigol-u-boot.dtsi
+new file mode 100644
+index 00000000..e7e0ac76
+--- /dev/null
++++ b/arch/arm/dts/rk3399-rigol-u-boot.dtsi
+@@ -0,0 +1,31 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Rigol DHO800/DHO900 and MHO900: U-Boot-only properties.
++ *
++ * Copyright (C) 2026 Olympian LED, Inc.
++ */
++
++#include "rk3399-u-boot.dtsi"
++/*
++ * LPDDR4, 2 channels x 32 bit, 1 rank, 4 GiB: PMUGRF OS_REG2 reads 0x32C1F2C1
++ * on these boards. This is the only LPDDR4 timing set
++ * in U-Boot; the driver trains at 400 MHz, runs at 800 MHz and detects rank,
++ * column, bank and row itself (drivers/ram/rockchip/sdram_rk3399.c sdram_init).
++ */
++#include "rk3399-sdram-lpddr4-100.dtsi"
++
++/ {
++	/* rk3399-u-boot.dtsi names the (absent) eMMC mmc0: the card is the only MMC here. */
++	aliases {
++		mmc0 = &sdmmc;
++		/delete-property/ mmc1;
++	};
++
++	chosen {
++		u-boot,spl-boot-order = "same-as-spl", &sdmmc;
++	};
++};
++
++&uart2 {
++	bootph-all;
++};
+diff --git a/arch/arm/dts/rk3399-rigol.dtsi b/arch/arm/dts/rk3399-rigol.dtsi
+new file mode 100644
+index 00000000..02628b11
+--- /dev/null
++++ b/arch/arm/dts/rk3399-rigol.dtsi
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * Rigol DHO800/DHO900 and MHO900 oscilloscopes (Rockchip RK3399): what the
++ * boot loader itself uses, nothing more. The kernel gets its own device tree
++ * from the boot image; this one is U-Boot's control DT only.
++ *
++ * Copyright (C) 2026 Olympian LED, Inc.
++ *
++ * The console (UART2 at 115200), the SD card on SDMMC0 (no eMMC is fitted)
++ * and OTG0 are as the NovaOS kernel's device trees for these boards have
++ * them; no pin that one of the two families must never have driven is
++ * named here. The front-panel UART0 is driven by board/rigol/rigol_rk3399
++ * through its
++ * registers, not by a driver, so its node stays disabled here.
++ */
++
++#include "rk3399.dtsi"
++
++/ {
++	aliases {
++		mmc0 = &sdmmc;
++	};
++
++	chosen {
++		stdout-path = "serial2:115200n8";
++	};
++};
++
++/* The console: UART2 channel C (GPIO4_C3/C4), 115200 8N1 in every stage. */
++&uart2 {
++	status = "okay";
++};
++
++/* The boot medium: an SD card on SDMMC0, 4-bit, SD high speed; no eMMC is fitted. */
++&sdmmc {
++	bus-width = <4>;
++	cap-sd-highspeed;
++	disable-wp;
++	pinctrl-names = "default";
++	pinctrl-0 = <&sdmmc_clk &sdmmc_cmd &sdmmc_cd &sdmmc_bus4>;
++	status = "okay";
++};
++
++&sdhci {
++	status = "disabled";
++};
++
++&emmc_phy {
++	status = "disabled";
++};
++
++/* Loader mode (Rockusb) on OTG0, the rear USB DEVICE connector, high speed only. */
++&u2phy0 {
++	status = "okay";
++};
++
++&u2phy0_otg {
++	status = "okay";
++};
++
++&usbdrd3_0 {
++	status = "okay";
++};
++
++&usbdrd_dwc3_0 {
++	dr_mode = "peripheral";
++	maximum-speed = "high-speed";
++	phys = <&u2phy0_otg>;
++	phy-names = "usb2-phy";
++	status = "okay";
++};
+diff --git a/arch/arm/mach-rockchip/rk3399/Kconfig b/arch/arm/mach-rockchip/rk3399/Kconfig
+index d84a9da8..fe3c58bd 100644
+--- a/arch/arm/mach-rockchip/rk3399/Kconfig
++++ b/arch/arm/mach-rockchip/rk3399/Kconfig
+@@ -87,6 +87,17 @@ config TARGET_ROCK960_RK3399
+ 	   * 2x USB 3.0 type A, 2x USB 2.0 type A (host mode only),
+ 	     1x USB 3.0 type C OTG
+ 
++config TARGET_RIGOL_RK3399
++	bool "Rigol DHO800/DHO900 and MHO900 oscilloscopes"
++	help
++	  The RK3399 main board of Rigol's DHO800/DHO900 and MHO900
++	  oscilloscopes: LPDDR4 (2 channels, 1 rank, 4 GiB), an SD card on
++	  SDMMC0 as the only boot medium, the console on UART2 at 115200 and
++	  the front-panel controller on UART0 at 1,500,000 baud. The board
++	  code keeps what the stock loaders do for the systems on the card:
++	  the reboot flags, Run/Stop into Loader mode and the power-on-mode
++	  frame to the front panel.
++
+ config TARGET_ROCKPI4_RK3399
+ 	bool "Radxa ROCK Pi 4 board"
+ 	help
+@@ -166,6 +177,7 @@ source "board/pine64/pinebook-pro-rk3399/Kconfig"
+ source "board/pine64/pinephone-pro-rk3399/Kconfig"
+ source "board/pine64/rockpro64_rk3399/Kconfig"
+ source "board/radxa/rockpi4-rk3399/Kconfig"
++source "board/rigol/rigol_rk3399/Kconfig"
+ source "board/rockchip/evb_rk3399/Kconfig"
+ source "board/theobroma-systems/puma_rk3399/Kconfig"
+ source "board/vamrs/rock960_rk3399/Kconfig"
+diff --git a/board/rigol/rigol_rk3399/Kconfig b/board/rigol/rigol_rk3399/Kconfig
+new file mode 100644
+index 00000000..25b0e159
+--- /dev/null
++++ b/board/rigol/rigol_rk3399/Kconfig
+@@ -0,0 +1,38 @@
++# SPDX-License-Identifier: GPL-2.0+
++#
++# Copyright (C) 2026 Olympian LED, Inc.
++
++if TARGET_RIGOL_RK3399
++
++config SYS_BOARD
++	default "rigol_rk3399"
++
++config SYS_VENDOR
++	default "rigol"
++
++config SYS_CONFIG_NAME
++	default "rigol_rk3399"
++
++choice
++	prompt "Rigol oscilloscope family"
++	default RIGOL_FAMILY_DHO
++
++config RIGOL_FAMILY_DHO
++	bool "DHO800/DHO900"
++
++config RIGOL_FAMILY_MHO
++	bool "MHO900"
++
++endchoice
++
++config RIGOL_RUNSTOP_WINDOW_MS
++	int "How long U-Boot listens for Run/Stop after the receive FIFO is read (ms)"
++	default 200
++	help
++	  SPL opens the front-panel UART0 at 1,500,000 baud before it loads
++	  U-Boot, so the frames sent from then on wait in the UART's receive
++	  FIFO. U-Boot reads them, then listens this much longer, for a Run/Stop
++	  press or release (FA 08 0C 34 AF or FA 08 00 58 AF) anywhere in the
++	  stream. Either one enters Loader mode (Rockusb).
++
++endif
+diff --git a/board/rigol/rigol_rk3399/MAINTAINERS b/board/rigol/rigol_rk3399/MAINTAINERS
+new file mode 100644
+index 00000000..3a4cc277
+--- /dev/null
++++ b/board/rigol/rigol_rk3399/MAINTAINERS
+@@ -0,0 +1,9 @@
++RIGOL DHO800/DHO900 AND MHO900 (RK3399)
++M:	Brady <brady@aioscilloscope.com>
++S:	Maintained
++F:	board/rigol/rigol_rk3399/
++F:	include/configs/rigol_rk3399.h
++F:	include/env/rigol/
++F:	arch/arm/dts/rk3399-rigol*
++F:	configs/rigol-dho900-rk3399_defconfig
++F:	configs/rigol-mho900-rk3399_defconfig
+diff --git a/board/rigol/rigol_rk3399/Makefile b/board/rigol/rigol_rk3399/Makefile
+new file mode 100644
+index 00000000..e33ab416
+--- /dev/null
++++ b/board/rigol/rigol_rk3399/Makefile
+@@ -0,0 +1,5 @@
++# SPDX-License-Identifier: GPL-2.0+
++#
++# Copyright (C) 2026 Olympian LED, Inc.
++
++obj-y	+= rigol_rk3399.o
+diff --git a/board/rigol/rigol_rk3399/rigol_bootflag.h b/board/rigol/rigol_rk3399/rigol_bootflag.h
+new file mode 100644
+index 00000000..31aabb43
+--- /dev/null
++++ b/board/rigol/rigol_rk3399/rigol_bootflag.h
+@@ -0,0 +1,67 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Copyright (C) 2026 Olympian LED, Inc.
++ *
++ * The reboot flags of the Rigol DHO800/DHO900 and MHO900, as the new chain
++ * keeps them (plain C with no U-Boot header: a host program can check it).
++ *
++ * PMUGRF OS_REG0 (0xff320300) holds 0x5242c3xx after a Linux reboot that
++ * names a mode (the kernel's reboot-mode node writes it), or 0x1888aaff
++ * after an interrupted Rockusb sector write. The stock boot loader reads it
++ * at reset and acts on the low byte; 0x1888aaff means Loader to it.
++ *
++ * What this chain does with them:
++ *   low byte 1 (mode-loader, mode-bootloader)  Loader (Rockusb), no timeout
++ *   low byte 3 (mode-recovery)                 boot the recovery slot first
++ *   0x1888aaff (loader error)                  Loader
++ *   anything else                              a normal boot
++ * Low bytes 6 and 7 ask the stock firmware for a data wipe (its recovery
++ * with --wipe_data). This chain never acts on them: they are a normal
++ * boot, and nothing here writes misc.
++ *
++ * Every value here is one a running scope writes or reads.
++ */
++
++#ifndef __RIGOL_BOOTFLAG_H
++#define __RIGOL_BOOTFLAG_H
++
++#define RIGOL_REBOOT_FLAG	0x5242c300u
++#define RIGOL_LOADER_ERROR	0x1888aaffu
++
++enum rigol_bootmode {
++	RIGOL_BOOT_NORMAL,
++	RIGOL_BOOT_LOADER,
++	RIGOL_BOOT_RECOVERY,
++};
++
++static inline enum rigol_bootmode rigol_decode_reboot_flag(unsigned int flag)
++{
++	if (flag == RIGOL_LOADER_ERROR)
++		return RIGOL_BOOT_LOADER;
++	/* The consumed form 0xc35242xx, zero, and anything unknown: normal. */
++	if ((flag & ~0xffu) != RIGOL_REBOOT_FLAG)
++		return RIGOL_BOOT_NORMAL;
++
++	switch (flag & 0xffu) {
++	case 0x01:
++		return RIGOL_BOOT_LOADER;
++	case 0x03:
++		return RIGOL_BOOT_RECOVERY;
++	default:
++		return RIGOL_BOOT_NORMAL;
++	}
++}
++
++static inline const char *rigol_bootmode_name(enum rigol_bootmode mode)
++{
++	switch (mode) {
++	case RIGOL_BOOT_LOADER:
++		return "loader";
++	case RIGOL_BOOT_RECOVERY:
++		return "recovery";
++	default:
++		return "normal";
++	}
++}
++
++#endif
+diff --git a/board/rigol/rigol_rk3399/rigol_rk3399.c b/board/rigol/rigol_rk3399/rigol_rk3399.c
+new file mode 100644
+index 00000000..6ea9a1d7
+--- /dev/null
++++ b/board/rigol/rigol_rk3399/rigol_rk3399.c
+@@ -0,0 +1,217 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Copyright (C) 2026 Olympian LED, Inc.
++ *
++ * Rigol DHO800/DHO900 and MHO900 (RK3399): what NovaOS and Rigol's own
++ * firmware expect of their boot loader, kept by the mainline chain:
++ *
++ *  - the reboot flag in PMUGRF OS_REG0, read before mainline's
++ *    setup_boot_mode() clears it (rigol_bootflag.h);
++ *  - Run/Stop at power-on enters Loader mode: the front-panel controller's
++ *    frames arrive on UART0 at 1,500,000 baud;
++ *  - the power-on-mode frame to that controller on every normal boot;
++ *  - no download key: SARADC channel 1 is not wired on this board, and
++ *    mainline's ADC check would reset into Maskrom.
++ *
++ * The misc bootloader message and the boot ladder are in the text
++ * environment (rigol_rk3399.env): the message is read at misc + 16 KiB only.
++ *
++ * UART0 is opened in SPL, before U-Boot is loaded, so every frame sent from
++ * then on waits in the receive FIFO for U-Boot proper to read. Its pins are
++ * GPIO2_C0/C1 only: GPIO2_C2 (UART0 CTS) is PCIe PERST# on the DHO and the
++ * AFG receive line on a rev-1 MHO, and is never touched.
++ *
++ * The front-panel controller's frames and baud rate are its own interface.
++ */
++
++#include <env.h>
++#include <time.h>
++#include <asm/io.h>
++#include <asm/arch-rockchip/cru_rk3399.h>
++#include <asm/arch-rockchip/grf_rk3399.h>
++#include <asm/arch-rockchip/hardware.h>
++#include <linux/delay.h>
++#include <linux/compiler.h>
++#include <linux/string.h>
++#include "rigol_bootflag.h"
++
++/* Register blocks (rk3399-base.dtsi; GRF as in mach-rockchip/rk3399/rk3399.c). */
++#define RK3399_CRU_BASE		0xff760000
++#define RK3399_GRF_BASE		0xff770000
++#define RK3399_PMUGRF_OS_REG0	0xff320300	/* CONFIG_ROCKCHIP_BOOT_MODE_REG */
++#define RIGOL_UART0_BASE	0xff180000	/* uart0: serial@ff180000 */
++
++/*
++ * DesignWare APB UART, 32-bit registers (reg-shift 2). SRR (0x88) and SFE
++ * (0x98) are DesignWare additions to the 16550 set: SRR resets the UART
++ * and its FIFOs, SFE turns the FIFOs on.
++ */
++#define UART_RBR		0x00
++#define UART_THR		0x00
++#define UART_DLL		0x00
++#define UART_DLH		0x04
++#define UART_IER		0x04
++#define UART_LCR		0x0c
++#define UART_LSR		0x14
++#define UART_SRR		0x88
++#define UART_SFE		0x98
++
++#define UART_LCR_8N1		0x03
++#define UART_LCR_DLAB		0x80
++#define UART_LSR_DR		0x01
++#define UART_LSR_THRE		0x20
++#define UART_LSR_TEMT		0x40
++#define UART_SRR_ALL		0x07	/* UART, receive FIFO and transmit FIFO reset */
++
++/*
++ * CRU, as Linux's drivers/clk/rockchip/clk-rk3399.c (v6.12) describes it:
++ * clk_uart0 is a mux in CLKSEL_CON33 bits [9:8] of {clk_uart0_div,
++ * clk_uart0_frac, xin24m}; pclk_uart0's gate is CLKGATE_CON22 bit 0.
++ */
++#define CRU_UART0_SEL_SHIFT	8
++#define CRU_UART0_SEL_MASK	(3 << CRU_UART0_SEL_SHIFT)
++#define CRU_UART0_SEL_XIN24M	(2 << CRU_UART0_SEL_SHIFT)
++#define CRU_PCLK_UART0_GATE	(1 << 0)
++
++/* 24 MHz / (16 x 1,500,000) = 1: the front-panel controller's 1,500,000 baud. */
++#define UART0_DIVISOR		1
++
++static void __maybe_unused rigol_uart0_open(void)
++{
++	struct rockchip_cru *cru = (void *)RK3399_CRU_BASE;
++	struct rk3399_grf_regs *grf = (void *)RK3399_GRF_BASE;
++	void __iomem *uart = (void __iomem *)RIGOL_UART0_BASE;
++
++	rk_clrsetreg(&cru->clksel_con[33], CRU_UART0_SEL_MASK, CRU_UART0_SEL_XIN24M);
++	rk_clrreg(&cru->clkgate_con[22], CRU_PCLK_UART0_GATE);
++	rk_clrsetreg(&grf->gpio2c_iomux,
++		     GRF_GPIO2C0_SEL_MASK | GRF_GPIO2C1_SEL_MASK,
++		     GRF_UART0BT_SIN << GRF_GPIO2C0_SEL_SHIFT |
++		     GRF_UART0BT_SOUT << GRF_GPIO2C1_SEL_SHIFT);
++
++	writel(UART_SRR_ALL, uart + UART_SRR);
++	udelay(10);
++	writel(0, uart + UART_IER);
++	writel(UART_LCR_DLAB | UART_LCR_8N1, uart + UART_LCR);
++	writel(UART0_DIVISOR & 0xff, uart + UART_DLL);
++	writel(UART0_DIVISOR >> 8, uart + UART_DLH);
++	writel(UART_LCR_8N1, uart + UART_LCR);
++	writel(1, uart + UART_SFE);	/* FIFOs on */
++}
++
++#ifdef CONFIG_XPL_BUILD
++
++#ifndef CONFIG_TPL_BUILD
++/* Called by spl_board_init() (mach-rockchip/rk3399/rk3399.c), in SPL only. */
++void led_setup(void)
++{
++	rigol_uart0_open();
++}
++#endif
++
++#else /* U-Boot proper */
++
++/* Front-panel frames: FA b1 b2 crc AF, crc the CRC-7/MMC of b1 and b2. */
++static const u8 rigol_runstop_press[5] = { 0xfa, 0x08, 0x0c, 0x34, 0xaf };
++static const u8 rigol_runstop_release[5] = { 0xfa, 0x08, 0x00, 0x58, 0xaf };
++static const u8 rigol_power_mode_auto[5] = { 0xfa, 0x05, 0x05, 0x0a, 0xaf };
++
++static bool rigol_uart0_is_open(void)
++{
++	void __iomem *uart = (void __iomem *)RIGOL_UART0_BASE;
++
++	return (readl(uart + UART_SFE) & 1) &&
++	       (readl(uart + UART_LCR) & 0xff) == UART_LCR_8N1;
++}
++
++/*
++ * Every frame the controller sent since SPL opened UART0 (the receive FIFO),
++ * then CONFIG_RIGOL_RUNSTOP_WINDOW_MS more: a Run/Stop press or release
++ * anywhere in that stream counts. Other keys' frames are skipped.
++ */
++static bool rigol_runstop_seen(void)
++{
++	void __iomem *uart = (void __iomem *)RIGOL_UART0_BASE;
++	ulong start = get_timer(0);
++	u8 w[5] = { 0 };
++
++	for (;;) {
++		while (readl(uart + UART_LSR) & UART_LSR_DR) {
++			memmove(w, w + 1, sizeof(w) - 1);
++			w[4] = readl(uart + UART_RBR) & 0xff;
++			if (!memcmp(w, rigol_runstop_press, sizeof(w)) ||
++			    !memcmp(w, rigol_runstop_release, sizeof(w)))
++				return true;
++		}
++		if (get_timer(start) >= CONFIG_RIGOL_RUNSTOP_WINDOW_MS)
++			return false;
++		udelay(50);
++	}
++}
++
++/* One frame to the front-panel controller: exactly its five bytes. */
++static void rigol_mcu_send(const u8 *frame, int len)
++{
++	void __iomem *uart = (void __iomem *)RIGOL_UART0_BASE;
++	ulong start = get_timer(0);
++	int i;
++
++	for (i = 0; i < len; i++) {
++		while (!(readl(uart + UART_LSR) & UART_LSR_THRE))
++			if (get_timer(start) > 10)
++				return;
++		writel(frame[i], uart + UART_THR);
++	}
++	while (!(readl(uart + UART_LSR) & UART_LSR_TEMT))
++		if (get_timer(start) > 10)
++			return;
++}
++
++/* No download key: never reset into Maskrom from U-Boot (boot_mode.c). */
++int rockchip_dnl_key_pressed(void)
++{
++	return 0;
++}
++
++/* From misc_init_r(), before board_late_init()'s setup_boot_mode() writes BOOT_NORMAL. */
++int rockchip_early_misc_init_r(void)
++{
++	u32 flag = readl(RK3399_PMUGRF_OS_REG0);
++	enum rigol_bootmode mode = rigol_decode_reboot_flag(flag);
++
++	printf("rigol: reboot flag 0x%08x: %s\n", flag, rigol_bootmode_name(mode));
++	env_set_hex("rigol_reboot_flag", flag);
++	env_set("rigol_bootmode", rigol_bootmode_name(mode));
++	env_set("rigol_bootreason", mode == RIGOL_BOOT_NORMAL ? "normal" : "reboot-flag");
++
++	return 0;
++}
++
++/* The end of board_late_init(): the reboot flag first, then Run/Stop, then the frame. */
++int rk_board_late_init(void)
++{
++	const char *mode = env_get("rigol_bootmode");
++
++	if (!mode || strcmp(mode, "normal"))
++		return 0;
++
++	if (!rigol_uart0_is_open())
++		rigol_uart0_open();
++
++	if (rigol_runstop_seen()) {
++		printf("rigol: Run/Stop at power-on: Loader mode\n");
++		env_set("rigol_bootmode", "loader");
++		env_set("rigol_bootreason", "runstop");
++		return 0;
++	}
++
++	/*
++	 * Auto: the manual setting is vendor-storage item 0x11, which is not
++	 * read here (the units seen carry none).
++	 */
++	rigol_mcu_send(rigol_power_mode_auto, sizeof(rigol_power_mode_auto));
++
++	return 0;
++}
++
++#endif /* CONFIG_XPL_BUILD */
+diff --git a/configs/rigol-dho900-rk3399_defconfig b/configs/rigol-dho900-rk3399_defconfig
+new file mode 100644
+index 00000000..fd18f245
+--- /dev/null
++++ b/configs/rigol-dho900-rk3399_defconfig
+@@ -0,0 +1,68 @@
++CONFIG_ARM=y
++CONFIG_SKIP_LOWLEVEL_INIT=y
++CONFIG_COUNTER_FREQUENCY=24000000
++CONFIG_ARCH_ROCKCHIP=y
++CONFIG_NR_DRAM_BANKS=1
++CONFIG_DEFAULT_DEVICE_TREE="rk3399-rigol-dho900"
++CONFIG_DM_RESET=y
++CONFIG_ROCKCHIP_RK3399=y
++CONFIG_ROCKCHIP_MASKROM_IMAGE=y
++CONFIG_TARGET_RIGOL_RK3399=y
++CONFIG_RIGOL_FAMILY_DHO=y
++CONFIG_SYS_LOAD_ADDR=0x800800
++CONFIG_DEBUG_UART_BASE=0xFF1A0000
++CONFIG_DEBUG_UART_CLOCK=24000000
++CONFIG_DEBUG_UART=y
++CONFIG_BOOTSTAGE=y
++CONFIG_BOOTSTAGE_FDT=y
++CONFIG_BOOTDELAY=0
++CONFIG_USE_BOOTCOMMAND=y
++CONFIG_BOOTCOMMAND="run rigol_boot"
++# CONFIG_BOOTSTD is not set
++CONFIG_DEFAULT_FDT_FILE="rk3399-rigol-dho900.dtb"
++CONFIG_DISPLAY_BOARDINFO_LATE=y
++CONFIG_SPL_MAX_SIZE=0x40000
++CONFIG_SPL_PAD_TO=0xf8000
++# CONFIG_SPL_RAW_IMAGE_SUPPORT is not set
++CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_USE_SECTOR=y
++CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR=0x800
++# CONFIG_SPL_ATF_NO_PLATFORM_PARAM is not set
++CONFIG_TPL=y
++CONFIG_CMD_BOOTSTAGE=y
++CONFIG_CMD_MMC=y
++CONFIG_CMD_READ=y
++CONFIG_CMD_ROCKUSB=y
++# CONFIG_CMD_SAVEENV is not set
++CONFIG_CMD_SETEXPR=y
++CONFIG_CRC32_VERIFY=y
++CONFIG_CMD_HASH=y
++CONFIG_HASH_VERIFY=y
++CONFIG_CMD_TIME=y
++# CONFIG_CMD_BCB is not set
++CONFIG_SPL_OF_CONTROL=y
++# CONFIG_OF_UPSTREAM is not set
++CONFIG_OF_SPL_REMOVE_PROPS="clock-names interrupt-parent assigned-clocks assigned-clock-rates assigned-clock-parents"
++CONFIG_ENV_IS_NOWHERE=y
++CONFIG_NO_NET=y
++# CONFIG_ADC is not set
++CONFIG_ROCKCHIP_GPIO=y
++CONFIG_MMC_DW=y
++CONFIG_MMC_DW_ROCKCHIP=y
++# CONFIG_MMC_SDHCI is not set
++CONFIG_PHY_ROCKCHIP_INNO_USB2=y
++CONFIG_RAM_ROCKCHIP_LPDDR4=y
++CONFIG_BAUDRATE=115200
++CONFIG_DEBUG_UART_SHIFT=2
++CONFIG_SYS_NS16550_MEM32=y
++CONFIG_SYSRESET=y
++CONFIG_USB=y
++CONFIG_USB_DWC3=y
++CONFIG_USB_DWC3_GENERIC=y
++CONFIG_USB_GADGET=y
++CONFIG_USB_GADGET_DOWNLOAD=y
++CONFIG_USB_FUNCTION_ROCKUSB=y
++# CONFIG_USB_FUNCTION_FASTBOOT is not set
++# CONFIG_WDT is not set
++CONFIG_SHA1=y
++CONFIG_ERRNO_STR=y
++# CONFIG_TOOLS_MKEFICAPSULE is not set
+diff --git a/configs/rigol-mho900-rk3399_defconfig b/configs/rigol-mho900-rk3399_defconfig
+new file mode 100644
+index 00000000..7ea43ec5
+--- /dev/null
++++ b/configs/rigol-mho900-rk3399_defconfig
+@@ -0,0 +1,68 @@
++CONFIG_ARM=y
++CONFIG_SKIP_LOWLEVEL_INIT=y
++CONFIG_COUNTER_FREQUENCY=24000000
++CONFIG_ARCH_ROCKCHIP=y
++CONFIG_NR_DRAM_BANKS=1
++CONFIG_DEFAULT_DEVICE_TREE="rk3399-rigol-mho900"
++CONFIG_DM_RESET=y
++CONFIG_ROCKCHIP_RK3399=y
++CONFIG_ROCKCHIP_MASKROM_IMAGE=y
++CONFIG_TARGET_RIGOL_RK3399=y
++CONFIG_RIGOL_FAMILY_MHO=y
++CONFIG_SYS_LOAD_ADDR=0x800800
++CONFIG_DEBUG_UART_BASE=0xFF1A0000
++CONFIG_DEBUG_UART_CLOCK=24000000
++CONFIG_DEBUG_UART=y
++CONFIG_BOOTSTAGE=y
++CONFIG_BOOTSTAGE_FDT=y
++CONFIG_BOOTDELAY=0
++CONFIG_USE_BOOTCOMMAND=y
++CONFIG_BOOTCOMMAND="run rigol_boot"
++# CONFIG_BOOTSTD is not set
++CONFIG_DEFAULT_FDT_FILE="rk3399-rigol-mho900.dtb"
++CONFIG_DISPLAY_BOARDINFO_LATE=y
++CONFIG_SPL_MAX_SIZE=0x40000
++CONFIG_SPL_PAD_TO=0xf8000
++# CONFIG_SPL_RAW_IMAGE_SUPPORT is not set
++CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_USE_SECTOR=y
++CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR=0x800
++# CONFIG_SPL_ATF_NO_PLATFORM_PARAM is not set
++CONFIG_TPL=y
++CONFIG_CMD_BOOTSTAGE=y
++CONFIG_CMD_MMC=y
++CONFIG_CMD_READ=y
++CONFIG_CMD_ROCKUSB=y
++# CONFIG_CMD_SAVEENV is not set
++CONFIG_CMD_SETEXPR=y
++CONFIG_CRC32_VERIFY=y
++CONFIG_CMD_HASH=y
++CONFIG_HASH_VERIFY=y
++CONFIG_CMD_TIME=y
++# CONFIG_CMD_BCB is not set
++CONFIG_SPL_OF_CONTROL=y
++# CONFIG_OF_UPSTREAM is not set
++CONFIG_OF_SPL_REMOVE_PROPS="clock-names interrupt-parent assigned-clocks assigned-clock-rates assigned-clock-parents"
++CONFIG_ENV_IS_NOWHERE=y
++CONFIG_NO_NET=y
++# CONFIG_ADC is not set
++CONFIG_ROCKCHIP_GPIO=y
++CONFIG_MMC_DW=y
++CONFIG_MMC_DW_ROCKCHIP=y
++# CONFIG_MMC_SDHCI is not set
++CONFIG_PHY_ROCKCHIP_INNO_USB2=y
++CONFIG_RAM_ROCKCHIP_LPDDR4=y
++CONFIG_BAUDRATE=115200
++CONFIG_DEBUG_UART_SHIFT=2
++CONFIG_SYS_NS16550_MEM32=y
++CONFIG_SYSRESET=y
++CONFIG_USB=y
++CONFIG_USB_DWC3=y
++CONFIG_USB_DWC3_GENERIC=y
++CONFIG_USB_GADGET=y
++CONFIG_USB_GADGET_DOWNLOAD=y
++CONFIG_USB_FUNCTION_ROCKUSB=y
++# CONFIG_USB_FUNCTION_FASTBOOT is not set
++# CONFIG_WDT is not set
++CONFIG_SHA1=y
++CONFIG_ERRNO_STR=y
++# CONFIG_TOOLS_MKEFICAPSULE is not set
+diff --git a/include/configs/rigol_rk3399.h b/include/configs/rigol_rk3399.h
+new file mode 100644
+index 00000000..2034cab2
+--- /dev/null
++++ b/include/configs/rigol_rk3399.h
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Rigol DHO800/DHO900 and MHO900 (RK3399).
++ *
++ * Copyright (C) 2026 Olympian LED, Inc.
++ */
++
++#ifndef __RIGOL_RK3399_H
++#define __RIGOL_RK3399_H
++
++/* The boot logic is the text environment board/rigol/rigol_rk3399/rigol_rk3399.env. */
++#define ROCKCHIP_DEVICE_SETTINGS \
++	"stdin=serial\0" \
++	"stdout=serial\0" \
++	"stderr=serial\0"
++
++#include <configs/rk3399_common.h>
++
++#endif

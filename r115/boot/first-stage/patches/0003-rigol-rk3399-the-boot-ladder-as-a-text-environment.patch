@@ -1,0 +1,354 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Tue, 27 Oct 2026 09:52:16 -0400
+Subject: [PATCH] rigol: rk3399: the boot ladder as a text environment
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+NovaOS local patch. The boot path the systems on the scope's card expect,
+as a U-Boot script:
+
+- every LBA comes from the scope's partition table (its PARM block,
+  include/env/rigol/rk3399-parm.env, generated from it), and the card's
+  own PARM must match it byte for byte (crc32 -v) before any is used;
+  otherwise Loader mode;
+- on a normal boot the misc message is read at misc + 16 KiB only, and
+  boot-recovery starts at recovery; nothing writes misc or the card;
+- the ladder boot -> recovery -> backup -> Loader (Rockusb), recovery
+  first for reboot-flag low byte 3; a slot that is neither KRNL nor
+  ANDROID! is skipped;
+- KRNL (Rigol Android): the ramdisk from the slot, the kernel from kernel,
+  rk-kernel.dtb from the resource RSCE;
+- ANDROID! (NovaOS): a v0 image checked by its id (SHA1 over kernel, size,
+  ramdisk, size, second, size and header bytes 32-575), its DTB from the
+  RSCE in second;
+- bootargs as the stock boot loader passes them: the DTB's
+  /chosen/bootargs, the PARM CMDLINE (the parameter entry first on a
+  recovery boot), storagemedia=sd androidboot.oem_unlocked=0
+  loader.timestamp=... SecureBootCheckOk=0.
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ board/rigol/rigol_rk3399/rigol_rk3399.env | 283 ++++++++++++++++++++++
+ include/env/rigol/rk3399-parm.env         |  22 ++
+ 2 files changed, 305 insertions(+)
+ create mode 100644 board/rigol/rigol_rk3399/rigol_rk3399.env
+ create mode 100644 include/env/rigol/rk3399-parm.env
+
+diff --git a/board/rigol/rigol_rk3399/rigol_rk3399.env b/board/rigol/rigol_rk3399/rigol_rk3399.env
+new file mode 100644
+index 00000000..22adcdb8
+--- /dev/null
++++ b/board/rigol/rigol_rk3399/rigol_rk3399.env
+@@ -0,0 +1,283 @@
++/*
++ * Rigol DHO800/DHO900 and MHO900 (RK3399): the boot ladder the systems on the
++ * card expect, as a script.
++ * Copyright (C) 2026 Olympian LED, Inc.
++ *
++ *   the PARM    the card's PARM copy at LBA 8192 must be the committed table,
++ *               byte for byte (rigol_parm_crc32): every LBA below comes from it.
++ *               Otherwise: Loader mode.
++ *   the mode    rigol_bootmode, set by the board code: normal, recovery (reboot
++ *               flag low byte 3) or loader (low byte 1, 0x1888aaff, Run/Stop).
++ *   misc        on a normal boot the message at misc + 16 KiB (only there:
++ *               offset 0 holds a stale --wipe_all), boot-recovery starts at
++ *               recovery. Nothing here writes misc, or anything else on the card.
++ *   the ladder  boot, then recovery, then backup, then Loader mode; recovery
++ *               starts at recovery. A slot whose first word is neither KRNL nor
++ *               ANDROID! (a zeroed boot) is skipped.
++ *   KRNL        Rigol Android: the ramdisk from the slot, the kernel from kernel,
++ *               the DTB rk-kernel.dtb from resource (an RSCE).
++ *   ANDROID!    NovaOS: an Android v0 image whose second is an RSCE carrying
++ *               rk-kernel.dtb, checked by its id: SHA1 over the kernel, its le32
++ *               size, the ramdisk, its size, the second, its size and header
++ *               bytes 32-575 (the id in header bytes 576-595). A mismatch
++ *               falls to the next slot.
++ *   bootargs    as the stock boot loader passes them: the DTB /chosen/bootargs, the
++ *               PARM CMDLINE (with the parameter entry first on a recovery boot),
++ *               then storagemedia=sd androidboot.oem_unlocked=0
++ *               loader.timestamp=... SecureBootCheckOk=0. No uboot_logo=: this
++ *               chain draws no logo.
++ */
++
++#include <env/rigol/rk3399-parm.env>
++
++/* Informational only (the stock line carries its loader's build time): the pinned commit date, UTC. */
++rigol_loader_timestamp=2026-10-05_21:35:33
++
++/*
++ * The card, through the generic read command: whole device (partition 0), raw LBAs.
++ * (A test can run this script on U-Boot's sandbox against a disk image by setting
++ * these two and rigol_loader.)
++ * bootcmd (CONFIG_BOOTCOMMAND) is run rigol_boot.
++ */
++rigol_dev=mmc 0:0
++rigol_dev_init=mmc dev 0
++
++/* Scratch: 4 header sectors; whole Android images; the id hash input; the ramdisk. */
++rigol_hdr=0x00c00000
++rigol_img=0x20000000
++rigol_hbuf=0x28000000
++rigol_rd=0x06000000
++
++rigol_boot=
++	setexpr rigol_hdr4 ${rigol_hdr} + 4;
++	setexpr rigol_hdr8 ${rigol_hdr} + 8;
++	setexpr rigol_hdr16 ${rigol_hdr} + 10;
++	setexpr rigol_hdr24 ${rigol_hdr} + 18;
++	setexpr rigol_hdr32 ${rigol_hdr} + 20;
++	setexpr rigol_hdr36 ${rigol_hdr} + 24;
++	setexpr rigol_hdr576 ${rigol_hdr} + 240;
++	setenv rigol_slot;
++	echo "rigol: mode ${rigol_bootmode} (${rigol_bootreason})";
++	if run rigol_dev_init && run rigol_check_parm; then
++		echo "rigol: PARM matches the committed table";
++	else
++		echo "rigol: the card PARM is not the committed table: Loader mode";
++		setenv rigol_bootmode loader;
++	fi;
++	if test "${rigol_bootmode}" = normal; then
++		run rigol_read_bcb;
++	fi;
++	if test "${rigol_bootmode}" = normal; then
++		run rigol_try_boot;
++	fi;
++	if test "${rigol_bootmode}" != loader; then
++		run rigol_try_recovery;
++		run rigol_try_backup;
++	fi;
++	run rigol_loader
++
++rigol_check_parm=
++	read ${rigol_dev} ${rigol_hdr} ${rigol_parm_lba} 2 &&
++	crc32 -v ${rigol_hdr} ${rigol_parm_bytes} ${rigol_parm_crc32}
++
++rigol_read_bcb=
++	if read ${rigol_dev} ${rigol_hdr} ${rigol_lba_misc_bcb} 3; then
++		setenv rigol_bcb;
++		setexpr.s rigol_bcb *${rigol_hdr};
++		if test "${rigol_bcb}" = boot-recovery; then
++			echo "rigol: misc + 16 KiB says boot-recovery";
++			setenv rigol_bootmode recovery;
++			setenv rigol_bootreason misc;
++		fi;
++	fi
++
++rigol_try_boot=
++	setenv rigol_slot boot;
++	setenv rigol_lba ${rigol_lba_boot};
++	setenv rigol_size ${rigol_size_boot};
++	run rigol_try_slot
++
++rigol_try_recovery=
++	setenv rigol_slot recovery;
++	setenv rigol_lba ${rigol_lba_recovery};
++	setenv rigol_size ${rigol_size_recovery};
++	run rigol_try_slot
++
++rigol_try_backup=
++	setenv rigol_slot backup;
++	setenv rigol_lba ${rigol_lba_backup};
++	setenv rigol_size ${rigol_size_backup};
++	run rigol_try_slot
++
++rigol_try_slot=
++	echo "rigol: trying ${rigol_slot} (LBA ${rigol_lba})";
++	if read ${rigol_dev} ${rigol_hdr} ${rigol_lba} 4; then
++		if itest.l *${rigol_hdr} == 0x4c4e524b; then
++			run rigol_boot_krnl;
++		elif itest.l *${rigol_hdr} == 0x52444e41 && itest.l *${rigol_hdr4} == 0x2144494f; then
++			run rigol_boot_android;
++		else
++			echo "rigol: ${rigol_slot}: bad image magic";
++		fi;
++	fi
++
++/*
++ * rigol_rsce=<address of an RSCE in memory> -> rigol_dtb_blk (512-byte blocks from
++ * the RSCE start) and rigol_dtb_len, or rigol_dtb_len empty. Entry 0 must be
++ * rk-kernel.dtb, as on both units resource and in every NovaOS second.
++ */
++rigol_rsce_dtb=
++	setenv rigol_dtb_len;
++	setexpr rigol_p8 ${rigol_rsce} + 8;
++	setexpr rigol_p10 ${rigol_rsce} + a;
++	setexpr rigol_pe ${rigol_rsce} + 200;
++	setexpr rigol_pn ${rigol_rsce} + 204;
++	setexpr rigol_po ${rigol_rsce} + 304;
++	setexpr rigol_ps ${rigol_rsce} + 308;
++	setenv rigol_name;
++	setexpr.s rigol_name *${rigol_pn};
++	if itest.l *${rigol_rsce} == 0x45435352 && itest.b *${rigol_p8} == 1 &&
++	   itest.b *${rigol_p10} == 1 && itest.l *${rigol_pe} == 0x52544e45 &&
++	   test "${rigol_name}" = rk-kernel.dtb; then
++		setexpr.l rigol_dtb_blk *${rigol_po};
++		setexpr.l rigol_dtb_len *${rigol_ps};
++	else
++		echo "rigol: no rk-kernel.dtb in the RSCE";
++	fi
++
++/* Rigol Android: KRNL ramdisk in the slot, KRNL kernel, resource DTB. */
++rigol_boot_krnl=
++	setexpr.l rigol_rdlen *${rigol_hdr4};
++	setexpr rigol_n ${rigol_rdlen} + 207;
++	setexpr rigol_n ${rigol_n} / 200;
++	if itest ${rigol_n} -le ${rigol_size} && read ${rigol_dev} ${rigol_rd} ${rigol_lba} ${rigol_n}; then
++		setexpr rigol_rdaddr ${rigol_rd} + 8;
++		run rigol_krnl_kernel;
++	else
++		echo "rigol: ${rigol_slot}: ramdisk read failed";
++	fi
++
++rigol_krnl_kernel=
++	if read ${rigol_dev} ${rigol_hdr} ${rigol_lba_kernel} 1 && itest.l *${rigol_hdr} == 0x4c4e524b; then
++		setexpr.l rigol_klen *${rigol_hdr4};
++		setexpr rigol_n ${rigol_klen} + 207;
++		setexpr rigol_n ${rigol_n} / 200;
++		if itest ${rigol_n} -le ${rigol_size_kernel} &&
++		   read ${rigol_dev} ${kernel_addr_r} ${rigol_lba_kernel} ${rigol_n}; then
++			setexpr rigol_kaddr ${kernel_addr_r} + 8;
++			run rigol_krnl_dtb;
++		else
++			echo "rigol: kernel read failed";
++		fi;
++	else
++		echo "rigol: kernel: bad image magic";
++	fi
++
++rigol_krnl_dtb=
++	setenv rigol_rsce ${rigol_hdr};
++	if read ${rigol_dev} ${rigol_hdr} ${rigol_lba_resource} 2; then
++		run rigol_rsce_dtb;
++	fi;
++	if test -n "${rigol_dtb_len}"; then
++		setexpr rigol_n ${rigol_dtb_len} + 1ff;
++		setexpr rigol_n ${rigol_n} / 200;
++		setexpr rigol_dtb_lba ${rigol_lba_resource} + ${rigol_dtb_blk};
++		if read ${rigol_dev} ${fdt_addr_r} ${rigol_dtb_lba} ${rigol_n} && fdt addr ${fdt_addr_r}; then
++			run rigol_set_bootargs;
++			echo "rigol: booting Rigol Android from ${rigol_slot}";
++			booti ${rigol_kaddr} ${rigol_rdaddr}:${rigol_rdlen} ${fdt_addr_r};
++		fi;
++	fi;
++	echo "rigol: ${rigol_slot}: Rigol Android did not start"
++
++/* NovaOS: an Android v0 image, its id checked, its DTB from the RSCE in second. */
++rigol_boot_android=
++	setexpr.l rigol_ksize *${rigol_hdr8};
++	setexpr.l rigol_rsize *${rigol_hdr16};
++	setexpr.l rigol_ssize *${rigol_hdr24};
++	setexpr.l rigol_page *${rigol_hdr36};
++	setexpr rigol_pm ${rigol_page} - 1;
++	setexpr rigol_kp ${rigol_ksize} + ${rigol_pm};
++	setexpr rigol_kp ${rigol_kp} / ${rigol_page};
++	setexpr rigol_rp ${rigol_rsize} + ${rigol_pm};
++	setexpr rigol_rp ${rigol_rp} / ${rigol_page};
++	setexpr rigol_sp ${rigol_ssize} + ${rigol_pm};
++	setexpr rigol_sp ${rigol_sp} / ${rigol_page};
++	setexpr rigol_np 1 + ${rigol_kp};
++	setexpr rigol_np ${rigol_np} + ${rigol_rp};
++	setexpr rigol_np ${rigol_np} + ${rigol_sp};
++	setexpr rigol_np ${rigol_np} * ${rigol_page};
++	setexpr rigol_n ${rigol_np} / 200;
++	if itest ${rigol_page} -ge 200 && itest ${rigol_ksize} -gt 0 && itest ${rigol_ssize} -gt 0 &&
++	   itest ${rigol_n} -le ${rigol_size} && read ${rigol_dev} ${rigol_img} ${rigol_lba} ${rigol_n}; then
++		run rigol_android_id;
++	else
++		echo "rigol: ${rigol_slot}: Android header out of range, or the read failed";
++	fi
++
++rigol_android_id=
++	setexpr rigol_koff ${rigol_img} + ${rigol_page};
++	setexpr rigol_roff ${rigol_kp} * ${rigol_page};
++	setexpr rigol_roff ${rigol_roff} + ${rigol_koff};
++	setexpr rigol_soff ${rigol_rp} * ${rigol_page};
++	setexpr rigol_soff ${rigol_soff} + ${rigol_roff};
++	setexpr rigol_q ${rigol_hbuf};
++	cp.b ${rigol_koff} ${rigol_q} ${rigol_ksize};
++	setexpr rigol_q ${rigol_q} + ${rigol_ksize};
++	mw.l ${rigol_q} ${rigol_ksize};
++	setexpr rigol_q ${rigol_q} + 4;
++	cp.b ${rigol_roff} ${rigol_q} ${rigol_rsize};
++	setexpr rigol_q ${rigol_q} + ${rigol_rsize};
++	mw.l ${rigol_q} ${rigol_rsize};
++	setexpr rigol_q ${rigol_q} + 4;
++	cp.b ${rigol_soff} ${rigol_q} ${rigol_ssize};
++	setexpr rigol_q ${rigol_q} + ${rigol_ssize};
++	mw.l ${rigol_q} ${rigol_ssize};
++	setexpr rigol_q ${rigol_q} + 4;
++	setexpr rigol_tail ${rigol_img} + 20;
++	cp.b ${rigol_tail} ${rigol_q} 220;
++	setexpr rigol_q ${rigol_q} + 220;
++	setexpr rigol_hlen ${rigol_q} - ${rigol_hbuf};
++	setexpr rigol_idaddr ${rigol_img} + 240;
++	if hash -v sha1 ${rigol_hbuf} ${rigol_hlen} *${rigol_idaddr}; then
++		run rigol_android_go;
++	else
++		echo "rigol: ${rigol_slot}: image id mismatch";
++	fi
++
++rigol_android_go=
++	setenv rigol_rsce ${rigol_soff};
++	run rigol_rsce_dtb;
++	if test -n "${rigol_dtb_len}"; then
++		setexpr rigol_dtb ${rigol_dtb_blk} * 200;
++		setexpr rigol_dtb ${rigol_dtb} + ${rigol_soff};
++		cp.b ${rigol_dtb} ${fdt_addr_r} ${rigol_dtb_len};
++		cp.b ${rigol_roff} ${rigol_rd} ${rigol_rsize};
++		if fdt addr ${fdt_addr_r}; then
++			run rigol_set_bootargs;
++			echo "rigol: booting NovaOS from ${rigol_slot}";
++			booti ${rigol_hbuf} ${rigol_rd}:${rigol_rsize} ${fdt_addr_r};
++		fi;
++	fi;
++	echo "rigol: ${rigol_slot}: NovaOS did not start"
++
++rigol_set_bootargs=
++	setenv rigol_dtbargs;
++	fdt get value rigol_dtbargs /chosen bootargs;
++	if test "${rigol_slot}" = recovery; then
++		setenv rigol_parmargs ${rigol_parm_cmdline_recovery};
++	else
++		setenv rigol_parmargs ${rigol_parm_cmdline};
++	fi;
++	setenv bootargs ${rigol_dtbargs} ${rigol_parmargs} storagemedia=sd androidboot.oem_unlocked=0
++		loader.timestamp=${rigol_loader_timestamp} SecureBootCheckOk=0
++
++/*
++ * Loader mode: Rockusb on OTG0 (2207:330c), no timeout. Mainline Rockusb serves raw
++ * card LBAs, not the stock Loader PARM base (+8192): a tool that expects the PARM at
++ * Loader LBA 0 refuses such a Loader.
++ */
++rigol_loader=
++	echo "rigol: Loader mode (Rockusb on the rear USB device port)";
++	rockusb 0 mmc 0;
++	reset
+diff --git a/include/env/rigol/rk3399-parm.env b/include/env/rigol/rk3399-parm.env
+new file mode 100644
+index 00000000..455b90c2
+--- /dev/null
++++ b/include/env/rigol/rk3399-parm.env
+@@ -0,0 +1,22 @@
++/*
++ * The scope's partition table (its PARM block, parameter.img) as variables,
++ * generated from the table whose sha256 is
++ * ff6822e003660b19027c751648fb60d37851a659ed61ca3f477d0d14fe11e0ce.
++ * Do not edit: the build regenerates it and refuses a difference.
++ */
++rigol_parm_lba=0x2000
++rigol_parm_bytes=0x3ae
++rigol_parm_crc32=4a377dc5
++rigol_lba_resource=0xa000
++rigol_size_resource=0x8000
++rigol_lba_kernel=0x12000
++rigol_size_kernel=0xc000
++rigol_lba_boot=0x1e000
++rigol_size_boot=0x10000
++rigol_lba_recovery=0x2e000
++rigol_size_recovery=0x20000
++rigol_lba_backup=0x4e000
++rigol_size_backup=0x38000
++rigol_lba_misc_bcb=0x8020
++rigol_parm_cmdline=androidboot.baseband=N/A androidboot.selinux=disabled androidboot.hardware=rk30board androidboot.console=ttyFIQ0 init=/init mtdparts=rk29xxnand:0x00002000@0x00002000(uboot),0x00002000@0x00004000(trust),0x00002000@0x00006000(misc),0x00008000@0x00008000(resource),0x0000C000@0x00010000(kernel),0x00010000@0x0001C000(boot),0x00020000@0x0002C000(recovery),0x00038000@0x0004C000(backup),0x00040000@0x00084000(cache),0x00400000@0x000C4000(system),0x00008000@0x004C4000(metadata),0x00000040@0x004CC000(verity_mode),0x00002000@0x004CC040(baseparamer),0x00000400@0x004CE040(frp),0x000FA000@0x004CE440(rigol),-@0x00600000(userdata)
++rigol_parm_cmdline_recovery=androidboot.baseband=N/A androidboot.selinux=disabled androidboot.hardware=rk30board androidboot.console=ttyFIQ0 init=/init mtdparts=rk29xxnand:0x00002000@0x00000000(parameter),0x00002000@0x00002000(uboot),0x00002000@0x00004000(trust),0x00002000@0x00006000(misc),0x00008000@0x00008000(resource),0x0000C000@0x00010000(kernel),0x00010000@0x0001C000(boot),0x00020000@0x0002C000(recovery),0x00038000@0x0004C000(backup),0x00040000@0x00084000(cache),0x00400000@0x000C4000(system),0x00008000@0x004C4000(metadata),0x00000040@0x004CC000(verity_mode),0x00002000@0x004CC040(baseparamer),0x00000400@0x004CE040(frp),0x000FA000@0x004CE440(rigol),-@0x00600000(userdata)

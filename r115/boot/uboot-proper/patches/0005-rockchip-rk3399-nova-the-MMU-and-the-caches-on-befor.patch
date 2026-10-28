@@ -1,0 +1,133 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Tue, 27 Oct 2026 12:00:00 +0000
+Subject: [PATCH 5/7] rockchip: rk3399: nova: the MMU and the caches on before
+ relocation
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+The chainload flavor of the Rigol DHO800/DHO900 and MHO900 board is entered
+as the arm64 boot protocol enters a kernel, with the MMU and the D-cache off,
+and the I-cache is off too; U-Boot turns them on only in board_r. Until then
+every instruction fetch, load and store goes to DRAM uncached: board_f took
+0.63-0.71 s with the A53 cluster at 816 MHz, 0.35 s of it the device model's
+pre-relocation scan of the control DT.
+
+mach_cpu_init, the first board hook after fdtdec_setup, now turns the
+I-cache, the MMU and the D-cache on with page tables for mem_map in .data, as
+the i.MX8M SoC code does; relocate_code already cleans the copy and
+invalidates the I-cache when the caches are on. enable_caches builds the same
+tables in the area arch_reserve_mmu set aside and points TTBR0_EL2 at them
+(every translation stays what it was), since the early tables stay in the
+load area the kernel is later loaded over. `nova boot` logs SCTLR_EL2 as the
+previous stage left it and where the tables went.
+
+The kexec test flavor keeps its uncached start: before relocation it reads
+memory a DMA master may have written.
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ board/rigol/nova_rk3399/nova_rk3399.c | 76 +++++++++++++++++++++++++++
+ 1 file changed, 76 insertions(+)
+
+diff --git a/board/rigol/nova_rk3399/nova_rk3399.c b/board/rigol/nova_rk3399/nova_rk3399.c
+index d5bb8925..24ed580f 100644
+--- a/board/rigol/nova_rk3399/nova_rk3399.c
++++ b/board/rigol/nova_rk3399/nova_rk3399.c
+@@ -43,6 +43,7 @@
+ #include <linux/delay.h>
+ #include <vsprintf.h>
+ #include <asm/cache.h>
++#include <asm/armv8/mmu.h>
+ #include <asm/global_data.h>
+ #include <asm/io.h>
+ #include <asm/psci.h>
+@@ -618,6 +619,80 @@ int arch_setup_dest_addr(void)
+ 	return 0;
+ }
+ 
++/* ------------------------------------------------------------------ the caches before relocation */
++
++#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
++/*
++ * U-Boot proper is entered as the arm64 boot protocol enters a kernel, with the MMU and the
++ * D-cache off, and here the I-cache off too (SCTLR_EL2 at its reset value), and U-Boot turns them
++ * on only in board_r (enable_caches). Until then every instruction fetch and every load and store
++ * goes to DRAM uncached: with the A53 cluster at 816 MHz, board_f took 0.63-0.71 s, most of it the
++ * device model's pre-relocation scan of the control DT (0.35 s), the console's and the RAM sizer's
++ * probes and arch_setup_dest_addr's walk of the previous stage's FDT. So the chainload turns the
++ * I-cache, the MMU and the D-cache on before the device model starts (mach_cpu_init, the first
++ * hook after fdtdec_setup), with page tables for U-Boot's own map (mem_map) in .data, as the i.MX8M
++ * SoC code does. relocate_code already copes with the caches on (it cleans the copy to the point of
++ * coherency and invalidates the I-cache). enable_caches() then builds the same tables in the area
++ * board_f set aside for them (arch_reserve_mmu) and moves the MMU over, because the early ones
++ * stay behind in the image's load area, which the kernel is later loaded over. The kexec test
++ * keeps its uncached start: before relocation it reads memory a DMA master may have written.
++ *
++ * setup_all_pgtables() makes the tables twice (the map and the emergency set), each a level-1
++ * table and the level-2 table for 3-4 GiB, where DRAM ends and the peripherals begin.
++ */
++#define NOVA_EARLY_TLB_SIZE	SZ_16K
++
++static u8 nova_early_tlb[NOVA_EARLY_TLB_SIZE] __section(".data") __aligned(SZ_4K);
++/* SCTLR_EL2 as the previous stage left it */
++static ulong nova_sctlr_at_entry __section(".data");
++/* mach_cpu_init turned the caches on on its own tables; enable_caches moved them (the address) */
++static bool nova_early_caches __section(".data");
++static ulong nova_tables_moved_to __section(".data");
++
++int mach_cpu_init(void)
++{
++	nova_sctlr_at_entry = get_sctlr();
++	if (mmu_status())
++		return 0;
++	gd->arch.tlb_addr = (ulong)nova_early_tlb;
++	gd->arch.tlb_size = sizeof(nova_early_tlb);
++	icache_enable();
++	dcache_enable();
++	nova_early_caches = true;
++	bootstage_mark_name(BOOTSTAGE_ID_ALLOC, "nova_caches_on");
++	return 0;
++}
++
++void enable_caches(void)
++{
++	if (nova_early_caches && mmu_status()) {
++		/*
++		 * The same map at gd->arch.tlb_addr, then TTBR0_EL2 pointed at it: every translation
++		 * stays what it was (same blocks, same attributes), so no break-before-make is needed,
++		 * and the table walks, cacheable, see the new tables without a clean.
++		 */
++		gd->arch.tlb_fillptr = 0;
++		mmu_setup();
++		__asm_invalidate_tlb_all();
++		nova_tables_moved_to = gd->arch.tlb_addr;
++		return;
++	}
++	icache_enable();
++	dcache_enable();
++}
++
++static void nova_caches_report(void)
++{
++	nlog("caches: sctlr_el2 %08lx at entry; %s", nova_sctlr_at_entry,
++	     !nova_early_caches ? "the MMU was on at entry: board_r's enable_caches" :
++	     nova_tables_moved_to ? "on before relocation (mach_cpu_init), the tables moved at board_r" :
++	     "on before relocation, the tables NOT moved");
++	if (nova_tables_moved_to)
++		nlog("caches: early tables at %lx, now %lx + %lx, sctlr_el2 %08lx", (ulong)nova_early_tlb,
++		     nova_tables_moved_to, gd->arch.tlb_size, get_sctlr());
++}
++#endif
++
+ /* ------------------------------------------------------------------ entry and reset */
+ 
+ /* What OS_REG1 held when this U-Boot started (before anything here wrote it). */
+@@ -1859,6 +1934,7 @@ static int do_boot(void)
+ 	u8 tag;
+ 
+ 	nova_entered();
++	nova_caches_report();
+ 	bootstage_mark_name(BOOTSTAGE_ID_ALLOC, "nova_boot");
+ 	if (nova_kexec_entry && !(x0 && fdt_chosen_u64(x0, CHAIN_PROP))) {
+ 		nova_bench = nova_bench_word(x0);

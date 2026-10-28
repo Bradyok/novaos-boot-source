@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Tue, 27 Oct 2026 09:45:10 -0400
+Subject: [PATCH] mmc: dw_mmc: poll the FIFO every microsecond, not every 200
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+NovaOS (Rigol DHO800/DHO900, MHO900; RK3399) local patch: in PIO (FIFO)
+mode, which SPL uses on RK3399 for SDMMC0 (u-boot,spl-fifo-mode),
+dwmci_fifo_ready() slept 200 us on every empty-FIFO poll. A 1 KiB FIFO
+refills in about 40 us at 49.5 MHz x 4 bit, so the read rate fell to about
+4 MB/s and a 1 MB u-boot.itb took about 0.25 s. The poll now sleeps 1 us;
+the 4 s limit is unchanged.
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ drivers/mmc/dw_mmc.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/mmc/dw_mmc.c b/drivers/mmc/dw_mmc.c
+index c2424d78..5efab5f6 100644
+--- a/drivers/mmc/dw_mmc.c
++++ b/drivers/mmc/dw_mmc.c
+@@ -183,11 +183,17 @@ static void dwmci_prepare_data(struct dwmci_host *host, struct mmc_data *data,
+ 
+ static int dwmci_fifo_ready(struct dwmci_host *host, u32 bit, u32 *len)
+ {
+-	u32 timeout = 20000;
++	/*
++	 * Poll every microsecond, not every 200: the bus refills a drained
++	 * 1 KiB FIFO in about 40 us at 50 MHz x 4 bit, so a 200 us sleep per
++	 * empty poll held SPL's PIO reads to about 4 MB/s. The limit stays
++	 * 4 s, as before.
++	 */
++	u32 timeout = 4000000;
+ 
+ 	*len = dwmci_readl(host, DWMCI_STATUS);
+ 	while (--timeout && (*len & bit)) {
+-		udelay(200);
++		udelay(1);
+ 		*len = dwmci_readl(host, DWMCI_STATUS);
+ 	}
+ 
