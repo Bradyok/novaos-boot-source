@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Wed, 28 Oct 2026 12:00:00 +0000
+Subject: [PATCH 07/10] lib: string: memmove copies backward a word at a time
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+Without an architecture memmove (arm64 has none unless USE_ARCH_MEMCPY is
+set), an overlapping move to a higher address copied one byte at a time.
+That is the move libfdt makes for every property it adds or grows:
+everything after the insertion point goes up by the property's size. On a
+Cortex-A53 at 816 MHz, adding thirty properties to a 110 KB device tree in
+ft_board_setup took 22 ms, almost all of it in this loop.
+
+When the source and destination ends are aligned alike, the backward copy
+now goes a long at a time, or 32 bits at a time when they share only 4-byte
+alignment (libfdt moves by multiples of four). Leading and trailing bytes
+are copied as before. Each word is loaded before it is stored, and every
+store lands above the bytes still to be read, so any overlap is safe. The
+forward case is unchanged (memcpy).
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ lib/string.c | 26 +++++++++++++++++++++++++-
+ 1 file changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/lib/string.c b/lib/string.c
+index dbf2ce34..042ed5e1 100644
+--- a/lib/string.c
++++ b/lib/string.c
+@@ -598,9 +598,33 @@ __rcode __used void *memmove(void *dest, const void *src, size_t count)
+ 	} else {
+ 		tmp = (char *) dest + count;
+ 		s = (char *) src + count;
++		/*
++		 * Backward, a word at a time where both ends align alike: growing a flattened
++		 * device tree moves everything after the insertion up by a multiple of four
++		 * bytes (thirty properties added to a 110 KB tree took 22 ms one byte at a
++		 * time on a 816 MHz Cortex-A53). Each word is read before it is written and
++		 * the writes stay above what is left to read, so any overlap is safe.
++		 */
++		if (!(((ulong)tmp ^ (ulong)s) & (sizeof(long) - 1))) {
++			for (; count && ((ulong)tmp & (sizeof(long) - 1)); count--)
++				*--tmp = *--s;
++			for (; count >= sizeof(long); count -= sizeof(long)) {
++				tmp -= sizeof(long);
++				s -= sizeof(long);
++				*(unsigned long *)tmp = *(unsigned long *)s;
++			}
++		} else if (!(((ulong)tmp ^ (ulong)s) & 3)) {
++			for (; count && ((ulong)tmp & 3); count--)
++				*--tmp = *--s;
++			for (; count >= 4; count -= 4) {
++				tmp -= 4;
++				s -= 4;
++				*(u32 *)tmp = *(u32 *)s;
++			}
++		}
+ 		while (count--)
+ 			*--tmp = *--s;
+-		}
++	}
+ 
+ 	return dest;
+ }

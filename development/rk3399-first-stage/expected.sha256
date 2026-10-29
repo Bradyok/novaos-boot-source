@@ -1,0 +1,25 @@
+# The default build's binaries (bash build.sh --out out, no test option): build.sh compares them at its end.
+# dho900/u-boot-tpl.bin, u-boot-spl.bin and idbloader.img are the bytes the DHO924S ran in the RAM boots of 2026-10-29.
+c8af9b84081f645e323bb5851cd0995e1d124f9c20cb54b5b4a3d4b505a109fe  dho900/idbloader.img
+a6be1272fb40f5bf5b2d978a846ec495764650f3183b67e02137b089a2505215  dho900/rigol-dho900-maskrom-loader.bin
+93cb13c0a3acd15b975c94ca1f92edbdc12cf6bb913de625c46cef3662fee824  dho900/u-boot-rockchip-usb471.bin
+c2c335e212d75bd724a58d019c0a4835f91de37aca5bc3c4f1c3f79e3a5fa3f0  dho900/u-boot-rockchip-usb472.bin
+34af8cf90393f5ff342368476a0adac3be879a9c922afd5ac2e4b1e048de7c98  dho900/u-boot-rockchip.bin
+592bb2e17f816a56d00f44faaf067841a39c2e0b9edf266c042a7c55dce55181  dho900/u-boot-spl.bin
+93cb13c0a3acd15b975c94ca1f92edbdc12cf6bb913de625c46cef3662fee824  dho900/u-boot-tpl.bin
+ab3bafecff1483176c52a7064a8fde5ac4606c7ecf0e8999b93bb9513c89f271  dho900/u-boot.bin
+b99ba78e795451f267691d11d4df40700e087e53ad064a923d6328be68e8ef19  dho900/u-boot.dtb
+571e7c48d403e9d4634fb83b628bbd5b9f81724adb6553339c131fe70c9e0edd  dho900/u-boot.itb
+bd361931fcec8d44717bf044cc09ec83317035b0b44906094b5445204c646631  mho900/idbloader.img
+85164c83c7adcc42795cee1a29da79f112d62854376b14fdb48b127088d0ff20  mho900/rigol-mho900-maskrom-loader.bin
+1ae83077ba5e68ea80f287caf148a10c75cd17df3c054335b8685a4293243477  mho900/u-boot-rockchip-usb471.bin
+b53193e2a1819e2b8da6f1b481f90eb40bf05bb4850bebca8d645d103a035c07  mho900/u-boot-rockchip-usb472.bin
+28d73cc3ed8f99f1395f62cfa70ec7a8b0e4c8a18cf98b9f52d4f42b62b427f7  mho900/u-boot-rockchip.bin
+cbca9f5faae89e080c57feed9268a4cf40950e6e210e5940398ffc5728eb4199  mho900/u-boot-spl.bin
+1ae83077ba5e68ea80f287caf148a10c75cd17df3c054335b8685a4293243477  mho900/u-boot-tpl.bin
+accc657dc450571f18926d2dbb72815b54b48fef1bcc8aae4df2f067ec852f35  mho900/u-boot.bin
+64943693ea159621b0ef2fe38bc025e648c8255eef8e7567c4dec0938e72f042  mho900/u-boot.dtb
+781868d007b7af6f4fadb58840f4f3b7439b3ab1b1c636d07fcfd22843f2aad6  mho900/u-boot.itb
+346740a35c1a476f3581f070d426e56f336be732220def82186e85c2b166b6f7  tf-a/bl31.elf
+4a4b5f6ea66ddc5787ef73a82798be60bc08b17158d82b411e897205ad13e236  tf-a/rk3399m0.bin
+358b57f6c17dfc221333181f62baebabf92011270910ffe6c8e1c168cfb71288  tf-a/rk3399m0pmu.bin

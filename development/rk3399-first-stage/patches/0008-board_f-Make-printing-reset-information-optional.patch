@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Wed, 28 Oct 2026 12:00:00 +0000
+Subject: [PATCH 08/10] board_f: Make printing reset information optional
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+A backport of U-Boot commit a1f39f70134734c7e3f061900fa988d46771da44
+("board_f: Make printing reset information optional", Alexey Charkov,
+2026-07-30, in v2027.01-rc1); the change is his, unchanged. From its
+message:
+
+  Current code tries to print information about the reset method whenever
+  sysreset support is enabled. This causes the core to try to bind the
+  sysreset device in board_init_f, even if the driver doesn't support
+  reset status reporting, causing pure waste on some platforms (e.g. on
+  Rockchip RK3576 it increases the boot time by ~0.4s even though the
+  driver doesn't support reset status reporting).
+
+  Make the printing of reset information optional, so that it can be
+  enabled only on platforms where it is supported and useful.
+
+The Rigol DHO800/DHO900 and MHO900 board resets through PSCI
+(SYSRESET_PSCI), whose get_status() reports nothing on the RK3399, so
+print_resetinfo() printed nothing there and still probed the sysreset
+device before relocation: 58 ms with the caches off, a few with them on.
+The new symbol defaults to n on this SoC.
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ common/board_f.c         |  4 ++--
+ drivers/sysreset/Kconfig | 14 ++++++++++++++
+ 2 files changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/common/board_f.c b/common/board_f.c
+index 9efcd949..59f1f173 100644
+--- a/common/board_f.c
++++ b/common/board_f.c
+@@ -122,7 +122,7 @@ static int display_text_info(void)
+ 	return 0;
+ }
+ 
+-#ifdef CONFIG_SYSRESET
++#ifdef CONFIG_SYSRESET_PRINT_RESETINFO
+ static int print_resetinfo(void)
+ {
+ 	struct udevice *dev;
+@@ -963,7 +963,7 @@ static void initcall_run_f(void)
+ 	INITCALL(display_options);	/* say that we are here */
+ 	INITCALL(display_text_info);	/* show debugging info if required */
+ 	INITCALL(checkcpu);
+-#if CONFIG_IS_ENABLED(SYSRESET)
++#if CONFIG_IS_ENABLED(SYSRESET_PRINT_RESETINFO)
+ 	INITCALL(print_resetinfo);
+ #endif
+ 	/* display cpu info (and speed) */
+diff --git a/drivers/sysreset/Kconfig b/drivers/sysreset/Kconfig
+index 16ef434a..a046dd02 100644
+--- a/drivers/sysreset/Kconfig
++++ b/drivers/sysreset/Kconfig
+@@ -43,6 +43,20 @@ config VPL_SYSRESET
+ 
+ if SYSRESET
+ 
++config SYSRESET_PRINT_RESETINFO
++	bool "Print reset information during boot"
++	default y if SANDBOX
++	default y if SYSRESET_MPC83XX
++	default y if SYSRESET_PSCI && ARCH_IMX9
++	default y if DM_PMIC_PCA9450
++	help
++	  Print information about the cause of the last reset during early
++	  boot, as reported by the get_status() method of the sysreset
++	  drivers. This requires probing all sysreset devices in
++	  board_init_f(), which costs boot time, so only enable it if at
++	  least one of the sysreset drivers in use actually implements
++	  get_status().
++
+ config SYSRESET_CMD_RESET
+ 	bool "sysreset implementation of the reset command"
+ 	default y

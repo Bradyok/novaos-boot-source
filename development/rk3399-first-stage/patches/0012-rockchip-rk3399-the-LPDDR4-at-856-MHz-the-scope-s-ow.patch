@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Wed, 28 Oct 2026 19:30:35 -0400
+Subject: [PATCH] rockchip: rk3399: the LPDDR4 at 856 MHz, the scope's own
+ memory rate
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+The scope's own firmware runs its memory at 856 MHz (DPLL 24 MHz /
+1 x 107 / 3 / 1). The TPL clock driver had no such rate, so the LPDDR4
+ran at 800 MHz. Add that DPLL setting, and an option of the board's,
+NOVA_RK3399_DDR_856 (off), that runs the LPDDR4 at it after the 400 MHz
+training, over the 800 MHz timing set: every timing is then 6.5 %
+shorter in time than that set was made for, so the option is for a test
+boot from RAM over USB, not a default.
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ board/rigol/nova_rk3399/Kconfig     | 10 ++++++++++
+ drivers/clk/rockchip/clk_rk3399.c   |  4 ++++
+ drivers/ram/rockchip/sdram_rk3399.c |  5 +++++
+ 3 files changed, 19 insertions(+)
+
+diff --git a/board/rigol/nova_rk3399/Kconfig b/board/rigol/nova_rk3399/Kconfig
+index c52fd66c..8891db7d 100644
+--- a/board/rigol/nova_rk3399/Kconfig
++++ b/board/rigol/nova_rk3399/Kconfig
+@@ -75,6 +75,16 @@ config NOVA_RK3399_MAINLINE
+ 
+ endchoice
+ 
++config NOVA_RK3399_DDR_856
++	bool "LPDDR4 at 856 MHz, the scope's own memory rate"
++	depends on NOVA_RK3399_MAINLINE && RAM_ROCKCHIP_LPDDR4
++	help
++	  TPL trains the LPDDR4 at 400 MHz as usual, then runs it at 856 MHz
++	  (DPLL 24 MHz / 1 x 107 / 3 / 1, the rate the scope's own firmware
++	  runs its memory at) instead of 800 MHz. The timings are the 800 MHz set's,
++	  so every timing is 6.5 % shorter in time than that set was made
++	  for: an option for a test boot from RAM over USB, not a default.
++
+ config NOVA_RK3399_LADDER
+ 	def_bool NOVA_RK3399_CHAINLOAD || NOVA_RK3399_MAINLINE
+ 	help
+diff --git a/drivers/clk/rockchip/clk_rk3399.c b/drivers/clk/rockchip/clk_rk3399.c
+index f5589bc1..9bebdff5 100644
+--- a/drivers/clk/rockchip/clk_rk3399.c
++++ b/drivers/clk/rockchip/clk_rk3399.c
+@@ -911,6 +911,10 @@ static ulong rk3399_ddr_set_clk(struct rockchip_cru *cru,
+ 		dpll_cfg = (struct pll_div)
+ 		{.refdiv = 1, .fbdiv = 100, .postdiv1 = 3, .postdiv2 = 1};
+ 		break;
++	case 856 * MHz:
++		dpll_cfg = (struct pll_div)
++		{.refdiv = 1, .fbdiv = 107, .postdiv1 = 3, .postdiv2 = 1};
++		break;
+ 	case 933 * MHz:
+ 		dpll_cfg = (struct pll_div)
+ 		{.refdiv = 1, .fbdiv = 116, .postdiv1 = 3, .postdiv2 = 1};
+diff --git a/drivers/ram/rockchip/sdram_rk3399.c b/drivers/ram/rockchip/sdram_rk3399.c
+index 6fa8f268..9e908965 100644
+--- a/drivers/ram/rockchip/sdram_rk3399.c
++++ b/drivers/ram/rockchip/sdram_rk3399.c
+@@ -3019,6 +3019,11 @@ static int sdram_init(struct dram_info *dram,
+ 	params->base.stride = calculate_stride(params);
+ 	dram_all_config(dram, params);
+ 
++#if IS_ENABLED(CONFIG_RAM_ROCKCHIP_LPDDR4) && IS_ENABLED(CONFIG_NOVA_RK3399_DDR_856)
++	/* 856 MHz, the rate the scope's own firmware runs its memory at, over the 800 MHz timing set */
++	if (params->base.dramtype == LPDDR4)
++		dfs_cfgs_lpddr4[1].base.ddr_freq = 856 * MHz;
++#endif
+ 	ret = dram->ops->set_rate_index(dram, params, 1);
+ 	if (ret)
+ 		return ret;

@@ -13,6 +13,14 @@ Each release is a tag here with a GitHub Release attached:
 The kernel these boot loaders start is published in
 [Bradyok/novaos-kernel-source](https://github.com/Bradyok/novaos-kernel-source).
 
+## Development preview: the open first stage
+
+[`development/rk3399-first-stage/`](development/rk3399-first-stage/) is not part of any release. It is the source
+of a first stage that is open from the BootROM on: U-Boot TPL with U-Boot's own LPDDR4 init (no Rockchip DDR blob),
+SPL, Trusted Firmware-A BL31 and U-Boot proper, with its own `build.sh` and README. On 2026-10-29 it booted NovaOS on a
+DHO924S from RAM over USB, with the memory at 800 MHz and at 856 MHz and memtester passing at both. Nothing was written
+to the scope's storage, and writing this first stage there is not supported yet.
+
 ## The download
 
 `u-boot-rk3399-novaos-r115.tar.xz` (70 MB) is the complete source, with nothing to fetch but the compilers:
@@ -47,7 +55,8 @@ The same release is readable here under `<release>/`: all of it but the source t
   2.52 s, MHO934 4.90 to 2.62 s; power-on to the scope screen in r115 10.68 s and 12.19 s), and hands the scope's boot
   logo to the kernel as the original boot does. In r115 it is qualified on the DHO924S and MHO934 bench
   units: six-reboot boot time, health and idle eMMC writes pass on both.
-- **The first stage** (TPL, SPL, TF-A) is built and checked by its build's own gates only. It has not run on a scope.
+- **r115's first stage** (TPL, SPL, TF-A) is built and checked by its build's own gates only. It has not run on a
+  scope. (The development preview above is a newer first stage, and it has run from RAM.)
 - A boot loader written to a scope's card replaces the scope's own boot path, and a wrong one can leave the scope
   unable to boot until it is recovered over USB in Maskrom mode. These files are published as source.
 

@@ -1,0 +1,331 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Wed, 28 Oct 2026 12:00:00 +0000
+Subject: [PATCH 06/10] rockchip: rk3399: nova: keep the stock U-Boot's boot
+ logo on the panel
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+Rigol's stock U-Boot draws the boot logo into DRAM and leaves the display
+controller scanning it out when it starts this U-Boot. In the FDT it passes
+in x0 it names that framebuffer, as the reg of the reserved-memory node
+compatible with "rockchip,drm-logo", and describes the picture in each
+display route (/display-subsystem/route/<route>: logo,offset, logo,width,
+logo,height, logo,bpp, logo,ymirror, the video,* timings and the overscan,*
+margins). Booting a kernel itself, it writes the same into the kernel's DTB;
+the kernel's display driver then reserves that memory, maps it 1:1 for the
+display controller's IOMMU and takes the picture over.
+
+The chainload boots the FIT's own DTB, whose drm-logo reg is empty and whose
+routes carry none of it. So the kernel reserved nothing there, used the
+framebuffer as free memory, and its display driver had no logo to take over:
+the panel showed the logo garbled, then a full screen of stripes, then black,
+until NovaOS drew its own splash. And this U-Boot relocated to the top of
+RAM, into the 32 MiB the stock U-Boot sets aside for the logo, clear of the
+picture only because the picture is small and at the start of that area.
+
+Now:
+- arch_setup_dest_addr keeps the relocated U-Boot (image, malloc, stacks,
+  page tables) below the logo x0 names, as it keeps the previous stage's FDT
+  and initrd;
+- `nova boot` keeps the logo out of lmb, so bootm places nothing there, and
+  takes a copy of x0;
+- ft_board_setup, for a NovaOS FIT only, writes x0's drm-logo reg into the
+  kernel's drm-logo node and every property of each x0 route the kernel's
+  route of the same name lacks or holds differently, except the route's
+  phandle, its connection and its status, which stay the booted DTB's.
+
+A kexec entry has no logo of the stock U-Boot's on the panel: it hands over
+nothing, and the FDT it gives a slot's U-Boot names no logo. The stock
+firmware's rung is unchanged.
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ board/rigol/nova_rk3399/nova_rk3399.c   | 200 +++++++++++++++++++++++-
+ board/rigol/nova_rk3399/nova_rk3399.env |   5 +-
+ 2 files changed, 202 insertions(+), 3 deletions(-)
+
+diff --git a/board/rigol/nova_rk3399/nova_rk3399.c b/board/rigol/nova_rk3399/nova_rk3399.c
+index 24ed580f..a64f7b06 100644
+--- a/board/rigol/nova_rk3399/nova_rk3399.c
++++ b/board/rigol/nova_rk3399/nova_rk3399.c
+@@ -482,6 +482,51 @@ static __maybe_unused u64 fdt_chosen_u64(const void *fdt, const char *name)
+ 	return 0;
+ }
+ 
++/*
++ * The boot logo on the panel: the stock U-Boot draws it into DRAM, leaves the display controller
++ * scanning it out, and names that framebuffer in its FDT as the reg of the reserved-memory node
++ * compatible with "rockchip,drm-logo" (the kernel's display driver takes the picture over from
++ * there). That node, a child of /reserved-memory (where the DT spec puts every reserved region),
++ * and its parent in *parent. Looked up below /reserved-memory, not by a scan of the whole tree:
++ * scans of a 100 KB tree cost milliseconds here, in every boot.
++ */
++static int nova_logo_node(const void *fdt, int *parent)
++{
++	int node;
++
++	*parent = fdt_path_offset(fdt, "/reserved-memory");
++	if (*parent < 0)
++		return *parent;
++	fdt_for_each_subnode(node, fdt, *parent)
++		if (!fdt_node_check_compatible(fdt, node, "rockchip,drm-logo"))
++			return node;
++	return -FDT_ERR_NOTFOUND;
++}
++
++/*
++ * The logo's range, or -1 when the FDT names none (an empty reg: no logo drawn) or one outside
++ * RAM.
++ */
++static int nova_logo_range(const void *fdt, u64 *base, u64 *size)
++{
++	int parent, node = nova_logo_node(fdt, &parent);
++	int ac, sc, len;
++	const fdt32_t *reg;
++
++	if (node < 0)
++		return -1;
++	ac = fdt_address_cells(fdt, parent);
++	sc = fdt_size_cells(fdt, parent);
++	reg = fdt_getprop(fdt, node, "reg", &len);
++	if (!reg || ac < 1 || ac > 2 || sc < 1 || sc > 2 || len < (ac + sc) * 4)
++		return -1;
++	*base = fdt_read_number(reg, ac);
++	*size = fdt_read_number(reg + ac, sc);
++	if (!*size || *base < gd->ram_base || *base + *size > gd->ram_top)
++		return -1;
++	return 0;
++}
++
+ #if IS_ENABLED(CONFIG_NOVA_RK3399_KEXEC_TEST)
+ /*
+  * The Ethernet MAC's receive ring as the old kernel left it, read before relocation (U-Boot's
+@@ -570,6 +615,9 @@ static void nova_rx_ring_log(void)
+  * the FDT's /chosen, found no kexec initrd ("lz4: no input"). The FDT, and the initrd its
+  * /chosen names, move relocaddr under them when they lie within NOVA_RELOC_ROOM of it (the
+  * relocated image, malloc, the control DT, gd/bd, MMU tables and stacks fit well inside).
++ * The boot logo the stock U-Boot left on the panel (nova_logo_range) is kept the same way: the
++ * display controller scans it out until the kernel's display driver takes it over, and U-Boot
++ * relocated on top of it (or the malloc area it zeroes) would be on the screen.
+  * Logged after relocation (nova_reloc_floor).
+  */
+ #define NOVA_RELOC_ROOM		SZ_64M
+@@ -582,7 +630,7 @@ int arch_setup_dest_addr(void)
+ {
+ 	phys_addr_t a = get_prev_bl_fdt_addr();
+ 	ulong top = gd->relocaddr, floor = top;
+-	u64 r[2][2];
++	u64 r[3][2];
+ 	const void *fdt;
+ 	int i, n = 0, moved = 1;
+ 
+@@ -602,6 +650,10 @@ int arch_setup_dest_addr(void)
+ 	r[n][1] = fdt_chosen_u64(fdt, "linux,initrd-end");
+ 	if (r[n][1] > r[n][0])
+ 		n++;
++	if (!nova_logo_range(fdt, &r[n][0], &r[n][1])) {
++		r[n][1] += r[n][0];
++		n++;
++	}
+ 	while (moved) {
+ 		moved = 0;
+ 		for (i = 0; i < n; i++) {
+@@ -1129,6 +1181,145 @@ static char *nova_strdup(const char *s)
+ 	return d;
+ }
+ 
++/* ------------------------------------------------------------------ the boot logo */
++
++/*
++ * The stock U-Boot draws the boot logo, leaves the display controller scanning it out, and says
++ * so in the FDT it passes in x0: the framebuffer as the reg of the "rockchip,drm-logo"
++ * reserved-memory node (nova_logo_range), and in each display route
++ * (/display-subsystem/route/<route>) the picture (logo,offset, logo,width, logo,height,
++ * logo,bpp, logo,ymirror), the timings it set (video,*) and the margins (overscan,*). The
++ * kernel's display driver reserves that memory, maps it for the display controller's IOMMU and
++ * takes the picture over. Without them the framebuffer is free memory to the kernel, the
++ * controller goes on scanning whatever the kernel puts there, and the panel shows that
++ * instead of the logo. This U-Boot boots the FIT's own DTB, so it carries them over:
++ * nova_logo_keep keeps the framebuffer out of U-Boot's own allocations (arch_setup_dest_addr
++ * keeps the relocated U-Boot below it), and nova_logo_handoff writes them into the kernel's
++ * FDT (ft_board_setup, for a NovaOS FIT only). A route's connection and status stay the
++ * booted DTB's own.
++ */
++static void *nova_logo_x0;	/* a copy of x0, when the logo on the panel is the stock U-Boot's */
++static bool nova_logo_now;	/* bootm of a NovaOS FIT: hand the logo over */
++
++static void nova_logo_keep(const void *x0)
++{
++	u64 base, size;
++
++	if (!x0 || nova_logo_range(x0, &base, &size)) {
++		nlog("logo: x0 names no boot logo (no drm-logo range): nothing to keep");
++		return;
++	}
++	nova_reserve(base, size, "boot logo");
++	nova_logo_x0 = malloc(fdt_totalsize(x0));
++	if (nova_logo_x0)
++		memcpy(nova_logo_x0, x0, fdt_totalsize(x0));
++	nlog("logo: the stock U-Boot's boot logo at %llx + %llx; U-Boot at %lx-%lx (%s)",
++	     (unsigned long long)base, (unsigned long long)size, gd->start_addr_sp - CONFIG_STACK_SIZE,
++	     gd->initial_relocaddr, base >= gd->initial_relocaddr ||
++	     base + size <= gd->start_addr_sp - CONFIG_STACK_SIZE ? "clear of it" : "OVER IT");
++}
++
++/* The properties of a route that stay the booted DTB's own. */
++static bool nova_logo_route_own(const char *name)
++{
++	return !strcmp(name, "phandle") || !strcmp(name, "linux,phandle") ||
++	       !strcmp(name, "connect") || !strcmp(name, "status");
++}
++
++/* /display-subsystem/route/<name> (or the route node itself, name NULL), or a negative error. */
++static int nova_route_node(const void *fdt, const char *name)
++{
++	int node = fdt_path_offset(fdt, "/display-subsystem");
++
++	if (node < 0 || fdt_node_check_compatible(fdt, node, "rockchip,display-subsystem"))
++		node = fdt_node_offset_by_compatible(fdt, -1, "rockchip,display-subsystem");
++	if (node >= 0)
++		node = fdt_subnode_offset(fdt, node, "route");
++	if (node >= 0 && name)
++		node = fdt_subnode_offset(fdt, node, name);
++	return node;
++}
++
++/* Into the kernel's FDT: the logo's framebuffer and each route's picture, as x0 has them. */
++static void nova_logo_handoff(void *blob)
++{
++	const void *x0 = nova_logo_x0, *val, *old;
++	const char *route, *name;
++	int node, parent, ac = 0, sc = 0, k = 0, c, p, len, olen, ret, n = 0, kroute;
++	u64 t0 = nova_us();
++	fdt32_t reg[4];
++	u64 base, size;
++
++	if (!x0 || nova_logo_range(x0, &base, &size))
++		return;
++	node = nova_logo_node(blob, &parent);
++	if (node >= 0) {
++		ac = fdt_address_cells(blob, parent);
++		sc = fdt_size_cells(blob, parent);
++	}
++	if (ac < 1 || ac > 2 || sc < 1 || sc > 2) {
++		nlog("logo: the kernel's FDT has no drm-logo node to take it: not handed over");
++		return;
++	}
++	if (ac == 2)
++		reg[k++] = cpu_to_fdt32(base >> 32);
++	reg[k++] = cpu_to_fdt32(base);
++	if (sc == 2)
++		reg[k++] = cpu_to_fdt32(size >> 32);
++	reg[k++] = cpu_to_fdt32(size);
++	ret = fdt_setprop(blob, node, "reg", reg, k * sizeof(*reg));
++	if (ret) {
++		nlog("logo: drm-logo reg: %d: not handed over", ret);
++		return;
++	}
++	/*
++	 * A setprop moves only what follows the node it writes: the route parent (looked up after the
++	 * reg above, once) and the route being written keep their offsets, and each route is looked up
++	 * among the parent's few children. Any lookup from the root walks the tree up to the node, as
++	 * long as a scan of all of it: once per property, that was 60 ms of every boot.
++	 */
++	kroute = nova_route_node(blob, NULL);
++	if (kroute < 0) {
++		nlog("logo: the kernel's FDT has no display route node: only the drm-logo reg handed over");
++		return;
++	}
++	c = nova_route_node(x0, NULL);
++	if (c >= 0)
++		c = fdt_first_subnode(x0, c);
++	for (; c >= 0; c = fdt_next_subnode(x0, c)) {
++		route = fdt_get_name(x0, c, NULL);
++		node = route ? fdt_subnode_offset(blob, kroute, route) : -1;
++		if (node < 0)
++			continue;
++		fdt_for_each_property_offset(p, x0, c) {
++			val = fdt_getprop_by_offset(x0, p, &name, &len);
++			if (!val || nova_logo_route_own(name))
++				continue;
++			old = fdt_getprop(blob, node, name, &olen);
++			if (old && olen == len && !memcmp(old, val, len))
++				continue;
++			ret = fdt_setprop(blob, node, name, val, len);
++			if (ret) {
++				nlog("logo: %s %s: %d", route, name, ret);
++				return;
++			}
++			n++;
++		}
++	}
++	nlog("logo: handed to the kernel: drm-logo %llx + %llx, %d route properties as x0 has them, in %lluus",
++	     (unsigned long long)base, (unsigned long long)size, n, (unsigned long long)(nova_us() - t0));
++}
++
++/* No boot logo on the panel (this U-Boot was kexec'd): the FDT for the next U-Boot names none. */
++static void nova_logo_forget(void *fdt)
++{
++	static const u8 zero[16];
++	int parent, node = nova_logo_node(fdt, &parent), len;
++
++	if (node >= 0 && fdt_getprop(fdt, node, "reg", &len) && len <= (int)sizeof(zero))
++		fdt_setprop_inplace(fdt, node, "reg", zero, len);
++}
++
+ /* The watchdog counts: armed at entry, and its counter moves. */
+ static bool nova_wdog_check(void)
+ {
+@@ -1310,7 +1501,9 @@ static void nova_bootm(void *fit, const char *line)
+ 	snprintf(cmd, sizeof(cmd), "bootm %lx#%s", (ulong)map_to_sysmem(fit), CONFIG_NOVA_FIT_CONFIG);
+ 	nlog("%s (%zu-byte command line)", cmd, strlen(line));
+ 	bootstage_mark_name(BOOTSTAGE_ID_ALLOC, "nova_bootm");
++	nova_logo_now = true;
+ 	run_command(cmd, 0);
++	nova_logo_now = false;
+ 	nlog("bootm returned");
+ }
+ 
+@@ -1346,6 +1539,8 @@ static void nova_chainload(const struct nova_img *x, const char *line)
+ 		nlog("%s: cannot write /chosen for its U-Boot", x->name);
+ 		return;
+ 	}
++	if (nova_kexec_entry)
++		nova_logo_forget(fdt);
+ 	env_set("bootargs", line);
+ 	pmsg_console();
+ 	snprintf(cmd, sizeof(cmd), "booti %lx - %lx", kaddr, faddr);
+@@ -1661,6 +1856,8 @@ int ft_board_setup(void *blob, struct bd_info *bd)
+ 	int i, ret = 0;
+ 
+ 	pmsg_console();
++	if (nova_logo_now)
++		nova_logo_handoff(blob);
+ 	for (i = 0; i < nova_lpi.count && !ret; i++) {
+ 		u8 *p = map_sysmem(nova_lpi.pend[i], LPI_PENDBASE_SZ);
+ 		ulong n = 0, j;
+@@ -1952,6 +2149,7 @@ static int do_boot(void)
+ 	}
+ 	nova_x0_line = nova_strdup(line);
+ 	nlog("x0: %s, its command line %zu bytes", x0 ? "an FDT" : "no FDT", line ? strlen(line) : 0);
++	nova_logo_keep(x0);
+ 	desc = nova_card();
+ 	bootstage_mark_name(BOOTSTAGE_ID_ALLOC, "nova_mmc_ready");
+ 	if (chain_lba) {
+diff --git a/board/rigol/nova_rk3399/nova_rk3399.env b/board/rigol/nova_rk3399/nova_rk3399.env
+index 7f6eceb6..8ffbbae1 100644
+--- a/board/rigol/nova_rk3399/nova_rk3399.env
++++ b/board/rigol/nova_rk3399/nova_rk3399.env
+@@ -3,8 +3,9 @@
+  * Copyright (C) 2026 Olympian LED, Inc.
+  *
+  * The default (and only) environment: ENV_IS_NOWHERE, nothing is ever saved.
+- * The OP-TEE hole is 0x08400000-0x0a1fffff (stock BL32 stays resident), the logo
+- * pool 0xf5c00000-0xf7bfffff, U-Boot itself relocates below 0xf8000000.
++ * The OP-TEE hole is 0x08400000-0x0a1fffff (stock BL32 stays resident). U-Boot itself
++ * relocates near the top of RAM, below the boot logo the stock U-Boot names in its FDT
++ * (the display controller is still scanning it out), and nothing here is placed there.
+  */
+ 
+ /* The UART stays quiet; U-Boot's output is recorded and copied to pmsg (nova reset/boot). */

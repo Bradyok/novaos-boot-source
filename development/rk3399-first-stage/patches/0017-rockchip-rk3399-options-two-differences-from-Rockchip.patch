@@ -1,0 +1,162 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Thu, 29 Oct 2026 10:50:00 -0400
+Subject: [PATCH] rockchip: rk3399: options, two differences from Rockchip's
+ own DDR code
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+Two places where sdram_rk3399.c no longer does what Rockchip's own copy
+(rockchip-linux/u-boot next-dev, from which it was ported) does, each
+an option of the board's, off:
+
+NOVA_RK3399_LPDDR4_PAD_SPEED: lpddr4_copy_phy() picks the PHY pads'
+speed field from the rate of a dfs_cfgs_lpddr4 entry, which is in Hz,
+against limits in MHz ("ram: rk3399: Clean up code", f8088bfc85fb,
+dropped the "* MHz"), so the field is 0 at 400 and at 800 MHz, after
+phy_io_config() set 2 ("ram: rk3399: Fix dram setting to make dram
+more stable", bcfacab517e9). Compare in MHz: 1 at 400, 2 at 800 or
+856. For LPDDR4 the compare decides nothing that lasts: set_ds_odt(),
+called right after it, ends in phy_io_config(), which writes 2 to the
+same fields at every rate. The option brings the compare in line.
+
+NOVA_RK3399_DDR_GRF_IE_POLARITY: pctl_start() writes 0x01000000 and
+then 0x01000100 to &ddrc0_con_0, the address of its local pointer,
+not to GRF_DDRC0_CON0 (and the same for channel 1) since "ram: rk3399:
+Add pctl start support" (a0aebe839841). Rockchip's copy writes the GRF:
+bit 8, ddr_ie_polarity in the TRM, cleared while the controller
+initializes and set again after. Write the GRF.
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ board/rigol/nova_rk3399/Kconfig     | 18 +++++++++++++
+ drivers/ram/rockchip/sdram_rk3399.c | 48 ++++++++++++++++++++++++++++------
+ 2 files changed, 58 insertions(+), 8 deletions(-)
+
+diff --git a/board/rigol/nova_rk3399/Kconfig b/board/rigol/nova_rk3399/Kconfig
+index 2aacc393..f585e266 100644
+--- a/board/rigol/nova_rk3399/Kconfig
++++ b/board/rigol/nova_rk3399/Kconfig
+@@ -117,6 +117,24 @@ config NOVA_RK3399_LPDDR4_TRFC_280
+ 	  in all three frequency sets before the init (about 2.6 % more of
+ 	  each refresh interval spent refreshing).
+ 
++config NOVA_RK3399_LPDDR4_PAD_SPEED
++	bool "LPDDR4 PHY pad speed by the rate (1 at 400 MHz, 2 at 800/856)"
++	depends on NOVA_RK3399_MAINLINE && RAM_ROCKCHIP_LPDDR4
++	help
++	  lpddr4_copy_phy() compares a rate in Hz with limits in MHz, so it
++	  sets the PHY pads' speed field to 0 at 400 and at 800 MHz. This
++	  compares in MHz, as Rockchip's own copy does; phy_io_config() then
++	  writes 2 to the same fields at every rate.
++
++config NOVA_RK3399_DDR_GRF_IE_POLARITY
++	bool "DDR init toggles GRF_DDRCx_CON0 ie_polarity as Rockchip's code does"
++	depends on NOVA_RK3399_MAINLINE
++	help
++	  pctl_start() meant to clear GRF_DDRC0_CON0/DDRC1_CON0 bit 8
++	  (ddr_ie_polarity) during the controller's init and set it after,
++	  as Rockchip's own copy does, but wrote to a local variable. This
++	  writes the GRF; off, the code is unchanged.
++
+ config NOVA_RK3399_LADDER
+ 	def_bool NOVA_RK3399_CHAINLOAD || NOVA_RK3399_MAINLINE
+ 	help
+diff --git a/drivers/ram/rockchip/sdram_rk3399.c b/drivers/ram/rockchip/sdram_rk3399.c
+index b39e5d02..7539e0d3 100644
+--- a/drivers/ram/rockchip/sdram_rk3399.c
++++ b/drivers/ram/rockchip/sdram_rk3399.c
+@@ -809,9 +809,22 @@ static void pctl_start(struct dram_info *dram,
+ 	u32 count = 0;
+ 	u32 byte, tmp;
+ 
++	/*
++	 * GRF_DDRC0_CON0/DDRC1_CON0 bit 8 is ddr0/1_ie_polarity (RK3399 TRM
++	 * part 1, GRF chapter; reset value 1). Rockchip's own copy of this code
++	 * clears it while the controller initializes and sets it again after;
++	 * this copy wrote the two values to the local pointer variables
++	 * (&ddrc0_con_0), so the GRF was never written. Only with
++	 * NOVA_RK3399_DDR_GRF_IE_POLARITY does it reach the GRF; without, the
++	 * code is as it was, the writes to the local included, so the default
++	 * build is unchanged.
++	 */
+ 	/* PHY_DLL_RST_EN */
+ 	if (channel_mask & 1) {
+-		writel(0x01000000, &ddrc0_con_0);
++		if (IS_ENABLED(CONFIG_NOVA_RK3399_DDR_GRF_IE_POLARITY))
++			writel(0x01000000, ddrc0_con_0);
++		else
++			writel(0x01000000, &ddrc0_con_0);
+ 		clrsetbits_le32(&denali_phy_0[957], 0x3 << 24, 0x2 << 24);
+ 	}
+ 
+@@ -829,7 +842,10 @@ static void pctl_start(struct dram_info *dram,
+ 			count++;
+ 		}
+ 
+-		writel(0x01000100, &ddrc0_con_0);
++		if (IS_ENABLED(CONFIG_NOVA_RK3399_DDR_GRF_IE_POLARITY))
++			writel(0x01000100, ddrc0_con_0);
++		else
++			writel(0x01000100, &ddrc0_con_0);
+ 		for (byte = 0; byte < 4; byte++)	{
+ 			tmp = 0x820;
+ 			writel((tmp << 16) | tmp,
+@@ -850,7 +866,10 @@ static void pctl_start(struct dram_info *dram,
+ 	}
+ 
+ 	if (channel_mask & 2) {
+-		writel(0x01000000, &ddrc1_con_0);
++		if (IS_ENABLED(CONFIG_NOVA_RK3399_DDR_GRF_IE_POLARITY))
++			writel(0x01000000, ddrc1_con_0);
++		else
++			writel(0x01000000, &ddrc1_con_0);
+ 		clrsetbits_le32(&denali_phy_1[957], 0x3 << 24, 0x2 << 24);
+ 	}
+ 	if (channel_mask & 2) {
+@@ -867,7 +886,10 @@ static void pctl_start(struct dram_info *dram,
+ 			count++;
+ 		}
+ 
+-		writel(0x01000100, &ddrc1_con_0);
++		if (IS_ENABLED(CONFIG_NOVA_RK3399_DDR_GRF_IE_POLARITY))
++			writel(0x01000100, ddrc1_con_0);
++		else
++			writel(0x01000100, &ddrc1_con_0);
+ 		for (byte = 0; byte < 4; byte++)	{
+ 			tmp = 0x820;
+ 			writel((tmp << 16) | tmp,
+@@ -2222,6 +2244,7 @@ static void lpddr4_copy_phy(struct dram_info *dram,
+ 	u32 *denali_ctl, *denali_phy;
+ 	u32 *denali_phy_params;
+ 	u32 speed = 0;
++	u32 ddr_mhz;
+ 	u32 ctl_fn, mr5;
+ 
+ 	denali_ctl = dram->chan[channel].pctl->denali_ctl;
+@@ -2431,12 +2454,21 @@ static void lpddr4_copy_phy(struct dram_info *dram,
+ 	clrsetbits_le32(&denali_phy[391], 0x3 << 24,
+ 			denali_phy_params[391] & (0x3 << 24));
+ 
+-	/* speed */
+-	if (params_cfg->base.ddr_freq < 400)
++	/*
++	 * speed: params_cfg is a dfs_cfgs_lpddr4 entry, whose ddr_freq is in
++	 * Hz, so these MHz limits leave speed at 0 at every rate. With
++	 * NOVA_RK3399_LPDDR4_PAD_SPEED the rate is compared in MHz, as
++	 * Rockchip's own copy of this code does (1 at 400 MHz, 2 at 800 or
++	 * 856 MHz; phy_io_config(), after it, writes 2 at every rate).
++	 */
++	ddr_mhz = params_cfg->base.ddr_freq;
++	if (IS_ENABLED(CONFIG_NOVA_RK3399_LPDDR4_PAD_SPEED))
++		ddr_mhz /= MHz;
++	if (ddr_mhz < 400)
+ 		speed = 0x0;
+-	else if (params_cfg->base.ddr_freq < 800)
++	else if (ddr_mhz < 800)
+ 		speed = 0x1;
+-	else if (params_cfg->base.ddr_freq < 1200)
++	else if (ddr_mhz < 1200)
+ 		speed = 0x2;
+ 
+ 	/* phy_924 phy_pad_fdbk_drive */

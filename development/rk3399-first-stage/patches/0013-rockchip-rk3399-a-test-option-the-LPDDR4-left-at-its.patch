@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Thu, 29 Oct 2026 03:14:04 -0400
+Subject: [PATCH] rockchip: rk3399: a test option, the LPDDR4 left at its 400
+ MHz training rate
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+NOVA_RK3399_DDR_400 (off) ends TPL's LPDDR4 init after the 400 MHz
+training, before the switch to the final rate: a RAM boot over USB with
+it tells the training apart from the rate switch.
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ board/rigol/nova_rk3399/Kconfig     | 8 ++++++++
+ drivers/ram/rockchip/sdram_rk3399.c | 4 ++++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/board/rigol/nova_rk3399/Kconfig b/board/rigol/nova_rk3399/Kconfig
+index 8891db7d..04fd7cf6 100644
+--- a/board/rigol/nova_rk3399/Kconfig
++++ b/board/rigol/nova_rk3399/Kconfig
+@@ -85,6 +85,14 @@ config NOVA_RK3399_DDR_856
+ 	  so every timing is 6.5 % shorter in time than that set was made
+ 	  for: an option for a test boot from RAM over USB, not a default.
+ 
++config NOVA_RK3399_DDR_400
++	bool "LPDDR4 left at its 400 MHz training rate (a test)"
++	depends on NOVA_RK3399_MAINLINE && RAM_ROCKCHIP_LPDDR4 && !NOVA_RK3399_DDR_856
++	help
++	  TPL trains the LPDDR4 at 400 MHz and stops there, with no switch
++	  to the final rate: for a RAM boot over USB that finds whether the
++	  training or the switch is what fails.
++
+ config NOVA_RK3399_LADDER
+ 	def_bool NOVA_RK3399_CHAINLOAD || NOVA_RK3399_MAINLINE
+ 	help
+diff --git a/drivers/ram/rockchip/sdram_rk3399.c b/drivers/ram/rockchip/sdram_rk3399.c
+index 9e908965..ead7f73e 100644
+--- a/drivers/ram/rockchip/sdram_rk3399.c
++++ b/drivers/ram/rockchip/sdram_rk3399.c
+@@ -3024,6 +3024,10 @@ static int sdram_init(struct dram_info *dram,
+ 	if (params->base.dramtype == LPDDR4)
+ 		dfs_cfgs_lpddr4[1].base.ddr_freq = 856 * MHz;
+ #endif
++	if (IS_ENABLED(CONFIG_NOVA_RK3399_DDR_400)) {
++		/* a test: stay at the 400 MHz the LPDDR4 is trained at */
++		return 0;
++	}
+ 	ret = dram->ops->set_rate_index(dram, params, 1);
+ 	if (ret)
+ 		return ret;

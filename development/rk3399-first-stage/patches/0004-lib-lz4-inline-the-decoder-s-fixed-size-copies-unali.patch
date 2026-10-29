@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Tue, 27 Oct 2026 12:00:00 +0000
+Subject: [PATCH 04/10] lib: lz4: inline the decoder's fixed-size copies,
+ unaligned where the MMU is on
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+U-Boot builds with -ffreestanding -fno-builtin, so every memcpy() in the
+LZ4 decoder's inner loop is a function call, although nearly all of them
+copy a constant 2, 4, 8 or 16 bytes (the literal and match fast paths).
+Map memcpy() to __builtin_memcpy() while lz4.c is included: the compiler
+turns the constant-size copies into loads and stores, and still calls
+memcpy() for a copy whose size it does not know. lz4.c itself is
+unchanged.
+
+On arm64 those copies are still byte loops: -mstrict-align, which arm64
+U-Boot is built with for code that may run with the MMU off, forbids the
+unaligned accesses LZ4's copies need. U-Boot proper with its D-cache on
+runs with the MMU on and its RAM mapped as Normal memory, where unaligned
+accesses are allowed, so build lz4_wrapper.o with -mno-strict-align
+there (not in SPL or TPL, not with SYS_DCACHE_OFF).
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ lib/Makefile      |  7 +++++++
+ lib/lz4_wrapper.c | 12 ++++++++++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/lib/Makefile b/lib/Makefile
+index 222378a8..96dd8f37 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -93,6 +93,13 @@ obj-$(CONFIG_$(PHASE_)GZIP) += gunzip.o
+ obj-$(CONFIG_$(PHASE_)LZO) += lzo/
+ obj-$(CONFIG_$(PHASE_)LZMA) += lzma/
+ obj-$(CONFIG_$(PHASE_)LZ4) += lz4_wrapper.o
++# arm64 U-Boot proper with its D-cache on decompresses with the MMU on, in Normal memory, so
++# the decoder's copies, unaligned by nature, may be unaligned loads and stores instead of the
++# byte loops -mstrict-align makes of them (that flag is for code that may run with the MMU off:
++# SPL, TPL, or a board without the D-cache).
++ifeq ($(CONFIG_ARM64)$(CONFIG_XPL_BUILD)$(CONFIG_SYS_DCACHE_OFF),y)
++CFLAGS_lz4_wrapper.o += -mno-strict-align
++endif
+ 
+ obj-$(CONFIG_$(PHASE_)LIB_RATIONAL) += rational.o
+ 
+diff --git a/lib/lz4_wrapper.c b/lib/lz4_wrapper.c
+index b1204511..e4fdc661 100644
+--- a/lib/lz4_wrapper.c
++++ b/lib/lz4_wrapper.c
+@@ -5,14 +5,26 @@
+ 
+ #include <compiler.h>
+ #include <image.h>
++#include <linux/bug.h>
+ #include <linux/kernel.h>
++#include <linux/string.h>
+ #include <linux/types.h>
++#include <asm/sections.h>
+ #include <asm/unaligned.h>
+ #include <u-boot/lz4.h>
+ 
++/*
++ * U-Boot builds with -fno-builtin, so each memcpy() in the decoder's inner loop, nearly all
++ * of a fixed 2, 4, 8 or 16 bytes, is a call. The compiler's own memcpy inlines those as one or
++ * two loads and stores and still calls memcpy() for the rest.
++ */
++#define memcpy(dst, src, n)	__builtin_memcpy(dst, src, n)
++
+ /* lz4.c is unaltered (except removing unrelated code) from github.com/Cyan4973/lz4. */
+ #include "lz4.c"	/* #include for inlining, do not link! */
+ 
++#undef memcpy
++
+ #define LZ4F_BLOCKUNCOMPRESSED_FLAG 0x80000000U
+ 
+ __rcode int ulz4fn(const void *src, size_t srcn, void *dst, size_t *dstn)

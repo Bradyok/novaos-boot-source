@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Thu, 29 Oct 2026 09:32:04 -0400
+Subject: [PATCH 1/2] rockchip: bootrom: a stage loaded over USB does not go
+ back for the download flag
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+The BootROM never reads the download flag (BOOT_BROM_DOWNLOAD in the
+boot-mode register); the stage it boots does, and goes back to the
+BootROM's download mode. The flag is still in the register when the
+BootROM is in that mode: whoever wrote it (a loader's Rockusb `RD 3`)
+reset into it. So a TPL or SPL sent over USB from there found its own
+request served, cleared the flag and went straight back: the BootROM
+waited for the same download again and the host's download failed.
+Only a second download, the flag cleared, would boot.
+
+Honor the flag only when the stage was not loaded over USB: when the
+BootROM's boot-source word does not read 10 (USB), nor 0x81, the value
+read_brom_bootsource_id() maps to USB. The flag is cleared either way.
+Rockchip's own RK3399 loader (rkbin rk3399_ddr_800MHz_v1.30), sent over
+USB from the same state, boots as well.
+
+Safe without a switch: a boot from the card reads the card's
+boot-source word (2 eMMC, 5 SD), never USB, so it honors the flag
+exactly as before; only a stage that came over USB, which the flag's
+request already got there, carries on.
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ arch/arm/mach-rockchip/bootrom.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/arch/arm/mach-rockchip/bootrom.c b/arch/arm/mach-rockchip/bootrom.c
+index 1db38546..107b726b 100644
+--- a/arch/arm/mach-rockchip/bootrom.c
++++ b/arch/arm/mach-rockchip/bootrom.c
+@@ -3,6 +3,7 @@
+  * Copyright (c) 2017 Google, Inc
+  */
+ 
++#include <config.h>
+ #include <hang.h>
+ #include <setjmp.h>
+ #include <asm/arch-rockchip/bootrom.h>
+@@ -51,6 +52,17 @@ static bool check_back_to_brom_dnl_flag(void)
+ 		boot_mode = readl(CONFIG_ROCKCHIP_BOOT_MODE_REG);
+ 		if (boot_mode == BOOT_BROM_DOWNLOAD) {
+ 			writel(0, CONFIG_ROCKCHIP_BOOT_MODE_REG);
++			/*
++			 * Loaded over USB, this stage was sent by the BootROM's download mode: the flag
++			 * that put the BootROM there is served (the flag stays in the register through
++			 * that reset, the BootROM never reads it). Going back would only make the BootROM
++			 * wait for this same download again. A stage booted from the card still goes back,
++			 * as before; only one whose boot-source word reads USB (10, or 0x81) carries on.
++			 */
++			if (BROM_BOOTSOURCE_ID_ADDR &&
++			    (readl(BROM_BOOTSOURCE_ID_ADDR) == BROM_BOOTSOURCE_USB ||
++			     readl(BROM_BOOTSOURCE_ID_ADDR) == 0x81))
++				return false;
+ 			return true;
+ 		}
+ 	}

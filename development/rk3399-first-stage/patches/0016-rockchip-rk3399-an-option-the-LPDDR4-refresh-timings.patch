@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Thu, 29 Oct 2026 10:40:00 -0400
+Subject: [PATCH] rockchip: rk3399: an option, the LPDDR4 refresh timings of 8
+ Gb per channel dies
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+rk3399-sdram-lpddr4-100.dtsi, the only LPDDR4 set, has tRFCab 180 ns,
+tXSNR 137.5 ns and a tXSR of 5 or 6 clocks in each of its three
+frequency sets. The scope's CXMT CXDB4CBAM are, by their datasheet,
+two x16 channels of 8 Gb, one rank. JEDEC JESD209-4 gives LPDDR4 dies
+of 8 Gb per channel tRFCab 280 ns and tXSR = tRFCab + 7.5 ns, 287.5 ns.
+Below those, the controller commands a die that is still refreshing,
+every 3.9 us, through the rank, capacity and training reads.
+
+NOVA_RK3399_LPDDR4_TRFC_280 (off) sets those three timings in all three
+CTL sets and the PI's tRFC copies before the init. Field positions are
+TF-A's (plat/rockchip/rk3399/drivers/dram/dfs.c, F0/F1); the boot set
+follows the same stride, as the dtsi's values show. tXSNR is held to
+tXSR's value.
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ board/rigol/nova_rk3399/Kconfig     | 10 +++++++
+ drivers/ram/rockchip/sdram_rk3399.c | 45 +++++++++++++++++++++++++++++
+ 2 files changed, 55 insertions(+)
+
+diff --git a/board/rigol/nova_rk3399/Kconfig b/board/rigol/nova_rk3399/Kconfig
+index 7c9e76fb..2aacc393 100644
+--- a/board/rigol/nova_rk3399/Kconfig
++++ b/board/rigol/nova_rk3399/Kconfig
+@@ -107,6 +107,16 @@ config NOVA_RK3399_TPL_TRACE
+ 	  (asm/arch-rockchip/nova_tpl_trace.h). For a RAM boot over USB;
+ 	  the watchdog keeps running into the next stage.
+ 
++config NOVA_RK3399_LPDDR4_TRFC_280
++	bool "LPDDR4 refresh timings of 8 Gb per channel dies (tRFCab 280 ns)"
++	depends on NOVA_RK3399_MAINLINE && RAM_ROCKCHIP_LPDDR4
++	help
++	  The LPDDR4 timing set has tRFCab 180 ns and a tXSR of a few clocks;
++	  the scope's CXDB4CBAM are 8 Gb per channel, for which JEDEC JESD209-4
++	  gives tRFCab 280 ns and tXSR = tRFCab + 7.5 ns. This sets those
++	  in all three frequency sets before the init (about 2.6 % more of
++	  each refresh interval spent refreshing).
++
+ config NOVA_RK3399_LADDER
+ 	def_bool NOVA_RK3399_CHAINLOAD || NOVA_RK3399_MAINLINE
+ 	help
+diff --git a/drivers/ram/rockchip/sdram_rk3399.c b/drivers/ram/rockchip/sdram_rk3399.c
+index ae64600c..b39e5d02 100644
+--- a/drivers/ram/rockchip/sdram_rk3399.c
++++ b/drivers/ram/rockchip/sdram_rk3399.c
+@@ -24,6 +24,7 @@
+ #include <asm/arch-rockchip/sdram_rk3399.h>
+ #include <asm/arch-rockchip/nova_tpl_trace.h>
+ #include <linux/delay.h>
++#include <linux/kernel.h>
+ #include <linux/err.h>
+ #include <time.h>
+ 
+@@ -2599,6 +2600,45 @@ static int lpddr4_set_rate(struct dram_info *dram,
+ 
+ 	return 0;
+ }
++
++/*
++ * NOVA_RK3399_LPDDR4_TRFC_280: the refresh timings of 8 Gb per channel dies.
++ *
++ * rk3399-sdram-lpddr4-100.dtsi carries tRFCab 180 ns, tXSNR 137.5 ns and a
++ * tXSR of 5 or 6 clocks in its three frequency sets, made for smaller dies. The
++ * scope's CXMT CXDB4CBAM (2 x16 channels of 512M x 16, row 16, one rank)
++ * are 8 Gb per channel, for which JEDEC JESD209-4 gives tRFCab 280 ns and
++ * tXSR = tRFCab + 7.5 ns (287.5 ns); tXSNR is set to the same value here.
++ * Longer is always legal.
++ *
++ * The fields are TF-A's (plat/rockchip/rk3399/drivers/dram/dfs.c): CTL_48/
++ * 49 [15:0] TRFC_F0/F1, CTL_59/60 [31:16] TXSR_F0/F1, CTL_60/61 [15:0]
++ * TXSNR_F0/F1, PI TRFC [9:0]; the third set (the boot rate) follows the same
++ * stride, which the dtsi's values confirm. The CTL sets are
++ * 0: 400 MHz, 1: the final rate, 2: the boot rate; the PI holds them as
++ * PI_48, PI_47 and PI_46.
++ */
++static void nova_lpddr4_trfc_280(struct rk3399_sdram_params *params)
++{
++	u32 *ctl = params->pctl_regs.denali_ctl;
++	u32 *pi = params->pi_regs.denali_pi;
++	u32 mhz[3] = {
++		dfs_cfgs_lpddr4[0].base.ddr_freq / MHz,
++		IS_ENABLED(CONFIG_NOVA_RK3399_DDR_856) ? 856 :
++			dfs_cfgs_lpddr4[1].base.ddr_freq / MHz,
++		params->base.ddr_freq,
++	};
++	u32 f, trfc, txsr;
++
++	for (f = 0; f < 3; f++) {
++		trfc = DIV_ROUND_UP(280 * mhz[f], 1000);
++		txsr = DIV_ROUND_UP(2875 * mhz[f], 10000);
++		ctl[48 + f] = (ctl[48 + f] & ~0xffff) | trfc;
++		pi[48 - f] = (pi[48 - f] & ~0x3ff) | trfc;
++		ctl[59 + f] = (ctl[59 + f] & 0xffff) | (txsr << 16);
++		ctl[60 + f] = (ctl[60 + f] & ~0xffff) | txsr;
++	}
++}
+ #endif /* CONFIG_RAM_ROCKCHIP_LPDDR4 */
+ 
+ /* CS0,n=1
+@@ -2960,6 +3000,11 @@ static int sdram_init(struct dram_info *dram,
+ 		return -E2BIG;
+ 	}
+ 
++#if defined(CONFIG_RAM_ROCKCHIP_LPDDR4)
++	if (IS_ENABLED(CONFIG_NOVA_RK3399_LPDDR4_TRFC_280) && dramtype == LPDDR4)
++		nova_lpddr4_trfc_280(params);
++#endif
++
+ 	/* detect rank */
+ 	for (ch = 0; ch < 2; ch++) {
+ 		params->ch[ch].cap_info.rank = 2;
