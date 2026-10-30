@@ -1,0 +1,115 @@
+Building the RK3399 boot chain of this release
+==============================================
+
+Everything this needs besides the tools below is in this directory. src/ holds the complete source
+tree of every component with our patches already applied (each lane's patches/ has them as patches,
+to read); FACTS.env names the upstream commit of each tree, and src/UPSTREAM.sha256 every file of it
+that is upstream's unchanged. build.sh builds in a copy of each tree. Nothing is downloaded.
+
+  bash build.sh --toolchains DIR [--out DIR] [--work DIR] [--lanes ...] [--families ...]
+                [--stage-b FAMILY=stage-b.img ...] [--check]
+
+Step by step (Linux x86_64, in the directory that holds boot/)
+--------------------------------------------------------------
+  1. Arm's two toolchains (the first-stage lane), each checked by its sha256:
+       mkdir toolchains && cd toolchains
+       curl -fLO https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-elf.tar.xz
+       curl -fLO https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel/arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi.tar.xz
+       echo 'eb54c4727440d03199a6af9a6d021e77f45410cad39effce4e5a1c10a88b7f04  arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-elf.tar.xz' | sha256sum -c
+       echo '62a63b981fe391a9cbad7ef51b17e49aeaa3e7b0d029b36ca1e9c3b2a9b78823  arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi.tar.xz' | sha256sum -c
+       tar -xJf arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-elf.tar.xz && tar -xJf arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi.tar.xz && cd ..
+  2. The host tools (below); on Debian or Ubuntu:
+       sudo apt install build-essential bc bison flex gawk libssl-dev uuid-dev libgnutls28-dev \
+           python3-dev python3-setuptools python3-pyelftools swig
+  3. The build, which needs no network and compares what it makes with expected.sha256:
+       bash boot/build.sh --toolchains "$PWD/toolchains" --check
+     It ends with "build.sh: N of N binaries are the shipped bytes"; the binaries are in boot/out/.
+
+Sources (src/)
+--------------
+  u-boot-first-stage       u-boot v2026.10, https://source.denx.de/u-boot/u-boot.git commit 5508406582f6f7120dce0c4b3059819a41788db2
+                           + 0001-rockchip-an-option-for-a-Linux-arm64-Image-header-on.patch, 0002-rockchip-rk3399-Rigol-DHO800-DHO900-and-MHO900-the-N.patch, 0003-clk-rockchip-rk3399-SD-SDIO-and-eMMC-clocks-from-the.patch, 0004-lib-lz4-inline-the-decoder-s-fixed-size-copies-unali.patch, 0005-rockchip-rk3399-nova-the-MMU-and-the-caches-on-befor.patch, 0006-rockchip-rk3399-nova-keep-the-stock-U-Boot-s-boot-lo.patch, 0007-lib-string-memmove-copies-backward-a-word-at-a-time.patch, 0008-rockchip-rk3399-nova-the-stock-rung-boots-the-stock-f.patch, 0009-board_f-Make-printing-reset-information-optional.patch, 0010-rockchip-boot_mode-an-option-for-a-board-without-a-d.patch, 0011-rockchip-rk3399-nova-Step-2-our-own-TPL-SPL-and-BL31.patch, 0012-mmc-dw_mmc-poll-the-FIFO-every-microsecond-not-every.patch, 0013-rockchip-rk3399-the-LPDDR4-at-856-MHz-the-scope-s-ow.patch, 0014-rockchip-rk3399-a-test-option-the-LPDDR4-left-at-its.patch, 0015-rockchip-bootrom-a-stage-loaded-over-USB-does-not-go.patch, 0016-rockchip-rk3399-nova-a-test-option-TPL-s-LPDDR4-init.patch, 0017-rockchip-rk3399-an-option-the-LPDDR4-refresh-timings.patch, 0018-rockchip-rk3399-options-two-differences-from-Rockchip.patch, 0019-rockchip-rk3399-the-LPDDR4-timing-set-of-the-Rigol-b.patch
+  tf-a-v2.15.0             tf-a v2.15.0, https://github.com/ARM-software/arm-trusted-firmware.git commit da738d5eae93af342fdc4995dd3c05acb4c9d757
+
+Lanes
+-----
+  first-stage   the card's boot chain from source: U-Boot TPL (DRAM), SPL and U-Boot proper, TF-A
+                BL31 with its Cortex-M0 PMU firmware; per family (dho900, mho900): idbloader.img,
+                u-boot.itb, u-boot-rockchip.bin, u-boot-rockchip-usb471.bin,
+                u-boot-rockchip-usb472.bin, u-boot.bin, u-boot-spl.bin, u-boot-tpl.bin, u-boot.dtb;
+                and tf-a/bl31.elf, rk3399m0.bin, rk3399m0pmu.bin. idbloader.img goes to card LBA 64,
+                u-boot.itb (U-Boot proper, BL31 and the control DT as a FIT) to LBA 2048.
+                Built with options besides the board's defaults (FACTS.env
+                FIRST_STAGE_VARIANT_<family>, which build.sh merges over the defconfig): dho900:
+                CONFIG_NOVA_RK3399_DDR_RIGOL=y; mho900: CONFIG_NOVA_RK3399_DDR_RIGOL=y.
+
+On the card (the DHO800/DHO900 and MHO900 card, in 512-byte sectors)
+----------------------------------------------------------------------
+  idbloader.img goes to LBA 64 and u-boot.itb to LBA 2048; u-boot-rockchip.bin is both, for one write at LBA 64.
+  Only LBA 64-7167 is ever written, u-boot.itb's region (2048-7167) first and the idbloader's (64-2047) last: the
+  IDB header at LBA 64 is the commit point, and until it is written the card still boots its own chain. Nothing at
+  LBA 7168 or beyond may be touched: 7168-7679 is the vendor storage (the unit's MAC address), 8064-16383 the scope's
+  U-Boot environment and its eight copies of the partition table (PARM), and from LBA 16384 on the scope's own
+  partitions (uboot, trust, misc, ..., the calibration, userdata). Never write at LBA 16384, U-Boot's default raw
+  U-Boot sector (0x4000): that is the scope's uboot partition. Save LBA 0-32767 before the first write; going back
+  is the saved LBA 64-7167, written the same way.
+
+  The partition table. U-Boot proper takes every LBA it reads from its build, so it first checks the card's PARM
+  copy at LBA 8192: the first 0x3ae (942) bytes there must have the crc32 0x4a377dc5, which both scope families'
+  cards have. A card whose table differs (a resized userdata) boots into Loader mode (Rockusb) every time. To check
+  a card from Linux (BusyBox too: gzip's trailer is that crc32), this prints 4a377dc5:
+    dd if=/dev/mmcblk0 bs=512 skip=8192 count=2 2>/dev/null | head -c 942 | gzip -1 | tail -c 8 | head -c 4 | od -An -tx4
+
+  The boot record. Each boot of the committed image in `recovery` writes a record to PMUGRF OS_REG1 (0xff320304)
+  before it starts, and NovaOS clears it once the boot has stayed up. A system of your own booted through this
+  U-Boot must clear it too, once it is up, or after three plain reboots in a row the fourth boot is the last rung,
+  the scope's original firmware (a power-on clears it as well):
+    busybox devmem 0xff320304 32 0
+
+  Getting to Maskrom from Linux, with this first stage on the card: the download flag 0xEF08A53C in PMUGRF OS_REG0
+  (0xff320300), then a reset by the watchdog WDT0 (0xff848000; it must be running, its control register there reading
+  1, as NovaOS's kernel leaves it): timeout 0, then a restart. That reset keeps OS_REG0, and the TPL sends the
+  BootROM to its download mode (USB 2207:330c):
+    busybox devmem 0xff320300 32 0xEF08A53C; busybox devmem 0xff848004 32 0; busybox devmem 0xff84800c 32 0x76
+  A plain reboot loses the flag: a kernel with Rockchip's reboot-mode pre-restart hook (NovaOS's has it) writes the
+  normal-boot flag over it at every restart, sysrq 'b' included. Check every digit: with the scope's own U-Boot on
+  the card, 0x5242C306 and 0x5242C307 in OS_REG0 ask it to wipe data.
+
+  Rockchip's prebuilt BL31 (rkbin rk3399_bl31_v1.36.elf) in place of TF-A's needs CONFIG_SPL_ATF_NO_PLATFORM_PARAM=y:
+  it reads the second argument SPL passes as Rockchip's parameter list and hangs on the device tree SPL puts there.
+  This package builds TF-A's BL31 and leaves that option off.
+
+Compilers (the exact ones; another compiler builds working binaries, not the same bytes)
+---------
+  first-stage: Arm GNU Toolchain, x86_64 Linux hosted, unpacked side by side in the --toolchains DIR
+  (or CROSS_COMPILE / M0_CROSS_COMPILE set to their prefixes):
+    https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-elf.tar.xz
+      sha256 eb54c4727440d03199a6af9a6d021e77f45410cad39effce4e5a1c10a88b7f04
+      aarch64-none-elf-gcc (Arm GNU Toolchain 14.2.Rel1 (Build arm-14.52)) 14.2.1 20241119
+    https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel/arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi.tar.xz
+      sha256 62a63b981fe391a9cbad7ef51b17e49aeaa3e7b0d029b36ca1e9c3b2a9b78823
+      arm-none-eabi-gcc (Arm GNU Toolchain 14.2.Rel1 (Build arm-14.52)) 14.2.1 20241119
+
+Host tools
+----------
+  Linux x86_64 with bash, make, a host gcc, bison, flex, coreutils, GNU awk (gawk: U-Boot proper's
+  build runs awk scripts, and with mawk its u-boot.bin differs), the OpenSSL and libuuid
+  development headers (U-Boot's host tools), and python3 with setuptools and its C headers, plus:
+    pyelftools 0.33   https://files.pythonhosted.org/packages/46/2a/f9697576603dae937727827505a6126a066affb227034e77e6f9068910da/pyelftools-0.33-py3-none-any.whl
+                      sha256 f215ad5f47d3f1373a21496a6c9e0707c622840d0622f23ff7ce08678b020036
+    SWIG 4.5.0        https://files.pythonhosted.org/packages/29/85/f5f7976ea09a4a16eee5b96f7d7c289685b19651c51ce9946128f1315440/swig-4.5.0-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.whl
+                      sha256 4821eb0b69869af25547fcd00c8235e274e43515d001fd32cf079d52eb7d1d99
+  (or the distribution's python3-pyelftools and swig: build tools, nothing of them is in a binary).
+
+What comes out the same
+-----------------------
+  With these compilers every binary in expected.sha256 is the shipped one byte for byte, wherever the
+  directory is: no binary holds a build path, and SOURCE_DATE_EPOCH (FACTS.env) is every timestamp in
+  them. build.sh ends by comparing them (--check makes a difference an error). The ELF files u-boot
+  and the linker maps a build also leaves are not in the list: they name the compiler's install
+  directory, and nothing of them ships.
+
+Not here, on purpose
+--------------------
+  rkdeveloptool (a PC tool that sends the Maskrom images over USB): it is in no binary that ships.
+  The kernel inside the recovery image is the kernel source bundle's.

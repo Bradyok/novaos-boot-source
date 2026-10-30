@@ -1,0 +1,71 @@
+Building the RK3399 boot chain of this release
+==============================================
+
+Everything this needs besides the tools below is in this directory. src/ holds the complete source
+tree of every component with our patches already applied (each lane's patches/ has them as patches,
+to read); FACTS.env names the upstream commit of each tree, and src/UPSTREAM.sha256 every file of it
+that is upstream's unchanged. build.sh builds in a copy of each tree. Nothing is downloaded.
+
+  bash build.sh --toolchains DIR [--out DIR] [--work DIR] [--lanes ...] [--families ...]
+                [--stage-b FAMILY=stage-b.img ...] [--check]
+
+Step by step (Linux x86_64, in the directory that holds boot/)
+--------------------------------------------------------------
+  1. The host tools (below); on Debian or Ubuntu:
+       sudo apt install build-essential bc bison flex gawk libssl-dev uuid-dev libgnutls28-dev \
+           python3-dev python3-setuptools python3-pyelftools swig gcc-aarch64-linux-gnu
+  2. The build, which needs no network and compares what it makes with expected.sha256:
+       bash boot/build.sh --check
+     It ends with "build.sh: N of N binaries are the shipped bytes"; the binaries are in boot/out/.
+     The recovery images are rebuilt only given the release's stage-B image of each family
+     (--stage-b dho900=FILE --stage-b mho900=FILE); without them they are listed as not rebuilt.
+
+Sources (src/)
+--------------
+  u-boot-uboot-proper      u-boot v2026.10, https://source.denx.de/u-boot/u-boot.git commit 5508406582f6f7120dce0c4b3059819a41788db2
+                           + 0001-rockchip-an-option-for-a-Linux-arm64-Image-header-on.patch, 0002-rockchip-rk3399-Rigol-DHO800-DHO900-and-MHO900-the-N.patch, 0003-clk-rockchip-rk3399-SD-SDIO-and-eMMC-clocks-from-the.patch, 0004-lib-lz4-inline-the-decoder-s-fixed-size-copies-unali.patch, 0005-rockchip-rk3399-nova-the-MMU-and-the-caches-on-befor.patch, 0006-rockchip-rk3399-nova-keep-the-stock-U-Boot-s-boot-lo.patch, 0007-lib-string-memmove-copies-backward-a-word-at-a-time.patch, 0008-rockchip-rk3399-nova-the-stock-rung-boots-the-stock-f.patch, 0009-board_f-Make-printing-reset-information-optional.patch, 0010-rockchip-boot_mode-an-option-for-a-board-without-a-d.patch, 0011-rockchip-rk3399-nova-Step-2-our-own-TPL-SPL-and-BL31.patch
+  lz4-1.10.0               lz4 v1.10.0, https://github.com/lz4/lz4/releases/download/v1.10.0/lz4-1.10.0.tar.gz
+
+Lanes
+-----
+  uboot-proper  U-Boot proper alone, per family (dho900, mho900) and flavor (kexec-test, chainload):
+                u-boot.bin, u-boot.dtb. And per family (dho900, mho900)
+                chain/recovery-uboot-chain.img, the image the scope's stock boot loader starts from
+                `recovery`: the chainload u-boot.bin as its kernel, the release's stage-B kernel (as
+                one lz4 -9 frame), DTB and initramfs as a FIT after it. install/ holds the scripts
+                that pack it (tools/boot/dho900_uboot_chain.py with rk_bootimg.py and
+                tools/kernel/tu15_fdt.py) and parm-cmdline.txt, the command line of the card's
+                partition table that the stock boot loader adds; build.sh runs them given the
+                release's stage-B image of each family (--stage-b FAMILY=FILE; FACTS.env names its
+                sha256).
+
+Compilers (the exact ones; another compiler builds working binaries, not the same bytes)
+---------
+  uboot-proper: the cross toolchain aarch64-linux-gnu-* of the build host (Ubuntu 26.04.1 LTS):
+      aarch64-linux-gnu-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+      GNU ld (GNU Binutils for Ubuntu) 2.46
+    (CROSS_COMPILE overrides the prefix; build.sh warns when the version differs)
+
+Host tools
+----------
+  Linux x86_64 with bash, make, a host gcc, bison, flex, coreutils, GNU awk (gawk: U-Boot proper's
+  build runs awk scripts, and with mawk its u-boot.bin differs), the OpenSSL and libuuid
+  development headers (U-Boot's host tools), and python3 with setuptools and its C headers, plus:
+    pyelftools 0.33   https://files.pythonhosted.org/packages/46/2a/f9697576603dae937727827505a6126a066affb227034e77e6f9068910da/pyelftools-0.33-py3-none-any.whl
+                      sha256 f215ad5f47d3f1373a21496a6c9e0707c622840d0622f23ff7ce08678b020036
+    SWIG 4.5.0        https://files.pythonhosted.org/packages/29/85/f5f7976ea09a4a16eee5b96f7d7c289685b19651c51ce9946128f1315440/swig-4.5.0-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.whl
+                      sha256 4821eb0b69869af25547fcd00c8235e274e43515d001fd32cf079d52eb7d1d99
+  (or the distribution's python3-pyelftools and swig: build tools, nothing of them is in a binary).
+
+What comes out the same
+-----------------------
+  With these compilers every binary in expected.sha256 is the shipped one byte for byte, wherever the
+  directory is: no binary holds a build path, and SOURCE_DATE_EPOCH (FACTS.env) is every timestamp in
+  them. build.sh ends by comparing them (--check makes a difference an error). The ELF files u-boot
+  and the linker maps a build also leaves are not in the list: they name the compiler's install
+  directory, and nothing of them ships.
+
+Not here, on purpose
+--------------------
+  rkdeveloptool (a PC tool that sends the Maskrom images over USB): it is in no binary that ships.
+  The kernel inside the recovery image is the kernel source bundle's.

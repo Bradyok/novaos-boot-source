@@ -1,0 +1,119 @@
+{
+ "release": "r131",
+ "boot": {
+  "lanes": {
+   "uboot-proper": {
+    "patches": [
+     "0001-rockchip-an-option-for-a-Linux-arm64-Image-header-on.patch",
+     "0002-rockchip-rk3399-Rigol-DHO800-DHO900-and-MHO900-the-N.patch",
+     "0003-clk-rockchip-rk3399-SD-SDIO-and-eMMC-clocks-from-the.patch",
+     "0004-lib-lz4-inline-the-decoder-s-fixed-size-copies-unali.patch",
+     "0005-rockchip-rk3399-nova-the-MMU-and-the-caches-on-befor.patch",
+     "0006-rockchip-rk3399-nova-keep-the-stock-U-Boot-s-boot-lo.patch",
+     "0007-lib-string-memmove-copies-backward-a-word-at-a-time.patch",
+     "0008-rockchip-rk3399-nova-the-stock-rung-boots-the-stock-f.patch",
+     "0009-board_f-Make-printing-reset-information-optional.patch",
+     "0010-rockchip-boot_mode-an-option-for-a-board-without-a-d.patch",
+     "0011-rockchip-rk3399-nova-Step-2-our-own-TPL-SPL-and-BL31.patch"
+    ],
+    "families": [
+     "dho900",
+     "mho900"
+    ],
+    "binaries": 10,
+    "build_id": "0a66aa1d326f",
+    "chain": [
+     "dho900",
+     "mho900"
+    ]
+   }
+  },
+  "trees": {
+   "u-boot-uboot-proper": {
+    "name": "u-boot",
+    "tag": "v2026.10",
+    "commit": "5508406582f6f7120dce0c4b3059819a41788db2",
+    "tree": "c54aa18f1c43c1b8b292434cc74cdc11e002f851",
+    "dir": "u-boot-uboot-proper",
+    "patches": [
+     "0001-rockchip-an-option-for-a-Linux-arm64-Image-header-on.patch",
+     "0002-rockchip-rk3399-Rigol-DHO800-DHO900-and-MHO900-the-N.patch",
+     "0003-clk-rockchip-rk3399-SD-SDIO-and-eMMC-clocks-from-the.patch",
+     "0004-lib-lz4-inline-the-decoder-s-fixed-size-copies-unali.patch",
+     "0005-rockchip-rk3399-nova-the-MMU-and-the-caches-on-befor.patch",
+     "0006-rockchip-rk3399-nova-keep-the-stock-U-Boot-s-boot-lo.patch",
+     "0007-lib-string-memmove-copies-backward-a-word-at-a-time.patch",
+     "0008-rockchip-rk3399-nova-the-stock-rung-boots-the-stock-f.patch",
+     "0009-board_f-Make-printing-reset-information-optional.patch",
+     "0010-rockchip-boot_mode-an-option-for-a-board-without-a-d.patch",
+     "0011-rockchip-rk3399-nova-Step-2-our-own-TPL-SPL-and-BL31.patch"
+    ],
+    "upstream_files": 38404,
+    "ours": [
+     "arch/arm/cpu/armv8/start.S",
+     "arch/arm/dts/rk3399-nova-rigol-dho900-u-boot.dtsi",
+     "arch/arm/dts/rk3399-nova-rigol-dho900.dts",
+     "arch/arm/dts/rk3399-nova-rigol-mho900-u-boot.dtsi",
+     "arch/arm/dts/rk3399-nova-rigol-mho900.dts",
+     "arch/arm/dts/rk3399-nova-rigol-u-boot.dtsi",
+     "arch/arm/dts/rk3399-nova-rigol.dtsi",
+     "arch/arm/mach-rockchip/Kconfig",
+     "arch/arm/mach-rockchip/boot_mode.c",
+     "arch/arm/mach-rockchip/rk3399/Kconfig",
+     "board/rigol/nova_rk3399/Kconfig",
+     "board/rigol/nova_rk3399/MAINTAINERS",
+     "board/rigol/nova_rk3399/Makefile",
+     "board/rigol/nova_rk3399/nova-chainload.config",
+     "board/rigol/nova_rk3399/nova-kexec-test.config",
+     "board/rigol/nova_rk3399/nova-mainline.config",
+     "board/rigol/nova_rk3399/nova_chain.c",
+     "board/rigol/nova_rk3399/nova_chain.h",
+     "board/rigol/nova_rk3399/nova_rk3399.c",
+     "board/rigol/nova_rk3399/nova_rk3399.env",
+     "board/rigol/nova_rk3399/nova_stock.c",
+     "board/rigol/nova_rk3399/nova_stock.h",
+     "board/rigol/nova_rk3399/nova_uart0.c",
+     "board/rigol/nova_rk3399/nova_uart0.h",
+     "common/board_f.c",
+     "configs/nova-dho900-rk3399_defconfig",
+     "configs/nova-mho900-rk3399_defconfig",
+     "drivers/clk/rockchip/clk_rk3399.c",
+     "drivers/sysreset/Kconfig",
+     "include/configs/nova_rk3399.h",
+     "lib/Makefile",
+     "lib/lz4_wrapper.c",
+     "lib/string.c"
+    ]
+   },
+   "lz4": {
+    "name": "lz4",
+    "tag": "v1.10.0",
+    "dir": "lz4-1.10.0",
+    "patches": [],
+    "version": "1.10.0",
+    "url": "https://github.com/lz4/lz4/releases/download/v1.10.0/lz4-1.10.0.tar.gz",
+    "tarball_sha256": "537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b",
+    "upstream_files": 208,
+    "ours": []
+   }
+  },
+  "install": [
+   "tools/boot/dho900_uboot_chain.py",
+   "tools/boot/rk_bootimg.py",
+   "tools/kernel/tu15_fdt.py"
+  ],
+  "source_date_epoch": 1791236133,
+  "shipped": [
+   {
+    "path": "stage-b/stage-b.img",
+    "sha256": "5d785f28d75281a42810a64f9af53e69901ff40c771ffd0bc7e351f6d8235ca0",
+    "is": "uboot-proper/dho900/chain/recovery-uboot-chain.img"
+   },
+   {
+    "path": "stage-b/stage-b.img",
+    "sha256": "5d11b051995bc34b786ce57f99094d073949d98c038c6b8c59e4ee829a144bcc",
+    "is": "uboot-proper/mho900/chain/recovery-uboot-chain.img"
+   }
+  ]
+ }
+}

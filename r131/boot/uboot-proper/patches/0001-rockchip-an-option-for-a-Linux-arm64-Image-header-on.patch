@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Tue, 27 Oct 2026 12:00:00 +0000
+Subject: [PATCH 01/11] rockchip: an option for a Linux arm64 Image header on
+ U-Boot proper
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+LINUX_KERNEL_IMAGE_HEADER is a hidden symbol that only SoC entries select
+(Snapdragon, Tegra, vexpress64, Xen). ROCKCHIP_LINUX_KERNEL_IMAGE_HEADER lets a
+Rockchip board select it, so that u-boot.bin starts with an arm64 Image header
+(image_size covers BSS and the initial stack, TEXT_OFFSET 0 because
+LNX_KRNL_IMG_TEXT_OFFSET_BASE defaults to TEXT_BASE here). With
+POSITION_INDEPENDENT, a running Linux can then load U-Boot proper with
+kexec_file_load(2), and a loader that boots only Linux Images can boot it.
+
+In TPL and SPL a SoC's own boot0 hook still comes first (start.S): Rockchip's
+reserves the word the BootROM's image header overwrites, so an Image header there
+would be cut by it. The header is U-Boot proper's.
+
+Used by the Rigol DHO800/DHO900 and MHO900 NovaOS board (next patch).
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ arch/arm/cpu/armv8/start.S     |  7 ++++++-
+ arch/arm/mach-rockchip/Kconfig | 12 ++++++++++++
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/cpu/armv8/start.S b/arch/arm/cpu/armv8/start.S
+index 40c342e9..e0daea78 100644
+--- a/arch/arm/cpu/armv8/start.S
++++ b/arch/arm/cpu/armv8/start.S
+@@ -18,7 +18,12 @@
+ 
+ .globl	_start
+ _start:
+-#if defined(CONFIG_LINUX_KERNEL_IMAGE_HEADER)
++/*
++ * In TPL and SPL a SoC's own boot0 hook comes first: Rockchip's reserves the word its BootROM's
++ * image header overwrites. The Linux Image header is for U-Boot proper.
++ */
++#if defined(CONFIG_LINUX_KERNEL_IMAGE_HEADER) && \
++	!(defined(CONFIG_XPL_BUILD) && defined(CONFIG_ENABLE_ARM_SOC_BOOT0_HOOK))
+ #include <asm/boot0-linux-kernel-header.h>
+ #elif defined(CONFIG_ENABLE_ARM_SOC_BOOT0_HOOK)
+ /*
+diff --git a/arch/arm/mach-rockchip/Kconfig b/arch/arm/mach-rockchip/Kconfig
+index 1a2e7847..b99e3bcb 100644
+--- a/arch/arm/mach-rockchip/Kconfig
++++ b/arch/arm/mach-rockchip/Kconfig
+@@ -758,6 +758,18 @@ config ROCKCHIP_MASKROM_IMAGE
+ 	  Rockchip SoCs support maskrom mode boot over USB. Enable this
+ 	  option to produce maskrom mode boot images containing U-Boot.
+ 
++config ROCKCHIP_LINUX_KERNEL_IMAGE_HEADER
++	bool "Start U-Boot proper with a Linux arm64 Image header"
++	depends on ARM64
++	select LINUX_KERNEL_IMAGE_HEADER
++	help
++	  Put an arm64 Linux Image header (magic "ARM\x64", image_size
++	  covering BSS and the initial stack) at the start of u-boot.bin, so
++	  that a running Linux can load U-Boot proper with kexec_file_load(2)
++	  and a previous-stage loader that boots only Linux Images can boot
++	  it. Use it with POSITION_INDEPENDENT: such a loader picks the load
++	  address. TEXT_OFFSET is 0 (LNX_KRNL_IMG_TEXT_OFFSET_BASE below).
++
+ config LNX_KRNL_IMG_TEXT_OFFSET_BASE
+ 	default TEXT_BASE
+ 

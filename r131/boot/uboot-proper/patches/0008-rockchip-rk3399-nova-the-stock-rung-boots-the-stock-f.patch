@@ -1,0 +1,234 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Thu, 29 Oct 2026 12:00:00 +0000
+Subject: [PATCH 08/11] rockchip: rk3399: nova: the stock rung boots the stock
+ firmware under the watchdog
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+When no NovaOS image boots, the ladder's last rung boots Rigol's stock
+firmware from backup, kernel and resource. That entry left the RK3399
+watchdog off: nothing but a reset stops a running DesignWare watchdog,
+and a stock kernel that did not feed it would be reset 21.47 s into
+every stock boot, back to the same rung. Left off, a hang in this
+U-Boot's ~1 s of card reads, or in the stock kernel before its watchdog
+driver probes, lasted until a power cycle.
+
+The stock kernel does feed it. Its dw_wdt is the legacy driver, whose
+timer pings a counting watchdog every half second for as long as nothing
+holds /dev/watchdog open, and nothing in the stock firmware opens it
+(its init.rockchip.rc leaves watchdogd disabled). With the watchdog armed
+at its longest timeout and the stock DTB as the card holds it, the stock
+firmware runs on.
+
+So nova_boot_stock() now arms it. It reads the stock DTB first, before
+the kernel and the ramdisk, and arms the watchdog only when that DTB's
+watchdog@ff848000 is enabled: a stock firmware without that node would
+never feed it. board_early_init_f still leaves a STOCK entry alone,
+since the DTB is not read there yet. The bench's kexec entry no longer
+disables the node in RAM: it boots stock exactly as the rung does.
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ board/rigol/nova_rk3399/nova_chain.h  |   2 +-
+ board/rigol/nova_rk3399/nova_rk3399.c | 115 ++++++++++++++++----------
+ 2 files changed, 71 insertions(+), 46 deletions(-)
+
+diff --git a/board/rigol/nova_rk3399/nova_chain.h b/board/rigol/nova_rk3399/nova_chain.h
+index 6e71280f..a667d9f7 100644
+--- a/board/rigol/nova_rk3399/nova_chain.h
++++ b/board/rigol/nova_rk3399/nova_chain.h
+@@ -44,7 +44,7 @@ enum nova_rec_kind {
+ 	NOVA_REC_TRY_SLOT = 1,		/* NovaOS staged a new image in the slot: try it, else recovery */
+ 	NOVA_REC_TRY_RECOVERY = 2,	/* recovery holds a new image (this U-Boot): try it, else the slot */
+ 	NOVA_REC_BOOT = 3,		/* a boot of the committed image, not yet confirmed */
+-	NOVA_REC_STOCK = 4,		/* the next entry boots the stock firmware, the watchdog never armed */
++	NOVA_REC_STOCK = 4,		/* the next entry boots the stock firmware (nova_boot_stock) */
+ };
+ 
+ /* The places an image is booted from. */
+diff --git a/board/rigol/nova_rk3399/nova_rk3399.c b/board/rigol/nova_rk3399/nova_rk3399.c
+index a64f7b06..f917aa6b 100644
+--- a/board/rigol/nova_rk3399/nova_rk3399.c
++++ b/board/rigol/nova_rk3399/nova_rk3399.c
+@@ -769,10 +769,21 @@ static void nova_entered(void)
+  * The earliest board hook (board_f, before relocation and before the console). The chainload flavor
+  * arms the watchdog here at its longest timeout, so a hang anywhere after this point -- in this
+  * U-Boot, or in a kernel before it takes the watchdog over -- ends in a reset instead of a dark scope.
+- * Not when the record says the stock firmware is booted this time: the stock kernel never feeds a
+- * watchdog, and nothing but a reset stops one. The kexec test leaves the watchdog to its own one
+- * restart (`nova kexec-test`).
++ * Not yet when the record says the stock firmware is booted this time: nothing but a reset stops a
++ * watchdog, so it is armed only once the stock DTB has shown that the stock kernel will feed it
++ * (nova_boot_stock). The kexec test leaves the watchdog to its own one restart (`nova kexec-test`).
+  */
++#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
++/* Arm the watchdog at its longest timeout, or restart it when it is counting already. */
++static void nova_wdog_arm(void)
++{
++	writel(WDT_TORR_MAX, WDT_TORR);
++	writel(WDT_CR_EN, WDT_CR);
++	writel(WDT_CRR_KICK, WDT_CRR);
++	nova_wdog_armed = true;
++}
++#endif
++
+ int board_early_init_f(void)
+ {
+ 	nova_os_reg1_at_entry = readl(PMUGRF_OS_REG1);
+@@ -791,10 +802,7 @@ int board_early_init_f(void)
+ 		if (nova_rec_parse(nova_os_reg1_at_entry, &kind, &pos, &tag) && kind == NOVA_REC_STOCK)
+ 			return 0;
+ 	}
+-	writel(WDT_TORR_MAX, WDT_TORR);
+-	writel(WDT_CR_EN, WDT_CR);
+-	writel(WDT_CRR_KICK, WDT_CRR);
+-	nova_wdog_armed = true;
++	nova_wdog_arm();
+ #endif
+ 	return 0;
+ }
+@@ -1126,9 +1134,9 @@ lz4:
+  * watchdog running (board_early_init_f), so an attempt that hangs ends in a reset, the reset comes
+  * back here (the stock recovery flag in OS_REG0 while a trial runs), and the record says which
+  * attempt is next. After the NovaOS images, the stock firmware: by the stock U-Boot itself when
+- * `boot` holds stock's boot image, else booted from `backup` by this U-Boot at the next entry with
+- * the watchdog never armed. Only a card that holds no stock boot image either ends in the stock
+- * Rockusb.
++ * `boot` holds stock's boot image, else booted from `backup` by this U-Boot at the next entry, the
++ * watchdog armed once the stock DTB shows the stock kernel feeds it. Only a card that holds no stock
++ * boot image either ends in the stock Rockusb.
+  */
+ 
+ /* The stock reboot flags (PMUGRF OS_REG0): a normal boot, Rockusb with no timeout, boot `recovery`. */
+@@ -1636,8 +1644,8 @@ static void __noreturn nova_loader(const char *why)
+  * The last rung: the stock firmware, which needs no PC. When `boot` holds stock's boot image the
+  * stock U-Boot boots it on a normal reset, its own way. Else, when `backup` holds it, the record
+  * says STOCK and a normal reset comes back here (`boot` holds nothing the stock U-Boot boots),
+- * where board_early_init_f leaves the watchdog off and nova_boot_stock() boots it. Both resets are
+- * normal boots, so the stock U-Boot reads the keys first (Run/Stop: Loader). Never returns.
++ * where nova_boot_stock() boots it, under the watchdog it arms there. Both resets are normal boots,
++ * so the stock U-Boot reads the keys first (Run/Stop: Loader). Never returns.
+  */
+ static void __noreturn nova_go_stock(const struct nova_card *c)
+ {
+@@ -1649,7 +1657,7 @@ static void __noreturn nova_go_stock(const struct nova_card *c)
+ 		nova_reset();
+ 	}
+ 	if (c->backup_krnl) {
+-		nlog("stock firmware: backup holds its boot image; booted from there at the next entry, the watchdog off");
++		nlog("stock firmware: backup holds its boot image; booted from there at the next entry");
+ 		writel(nova_rec_make(NOVA_REC_STOCK, 0, 0), PMUGRF_OS_REG1);
+ 		writel(FLAG_NORMAL, PMUGRF_OS_REG0);
+ 		nova_reset();
+@@ -1678,8 +1686,32 @@ static u32 nova_krnl(struct blk_desc *desc, lbaint_t lba, u8 *buf, u32 max, cons
+  * The stock firmware, booted as the stock U-Boot boots `backup` holding stock's boot image: the
+  * ramdisk from `backup`'s KRNL container, the kernel from `kernel`'s, the DTB `rk-kernel.dtb` from
+  * `resource`, the command line from that DTB, the PARM's CMDLINE and the stock U-Boot's own words.
+- * Entered with the watchdog off (a record of kind STOCK). Returns only on failure.
++ * Entered with the watchdog off (a record of kind STOCK: board_early_init_f did not arm it) or, on a
++ * kexec bench entry, counting. Returns only on failure.
++ *
++ * The watchdog: the stock 4.4 kernel's dw_wdt (the legacy driver, before the watchdog core) keeps a
++ * counting watchdog fed from a kernel timer for as long as nothing holds /dev/watchdog open, and
++ * nothing in the stock firmware opens it (its init.rockchip.rc leaves watchdogd disabled): its timer
++ * reloads the counter every half second, and the stock firmware runs on. So it is armed
++ * here, before the ~1 s of card reads and the stock kernel's first 1.3 s, where a hang would
++ * otherwise last until a power cycle -- but only when the stock DTB's watchdog@ff848000 is enabled:
++ * without that node the stock kernel never feeds it, and an armed watchdog would reset every stock
++ * boot 21.47 s in, a loop back to this rung. Hence the DTB is read before the kernel and ramdisk.
+  */
++static bool nova_stock_dtb_wdt(const void *dtb)
++{
++	int node = fdt_node_offset_by_compatible(dtb, -1, "snps,dw-wdt");
++	const char *name, *status;
++
++	if (node < 0)
++		return false;
++	name = fdt_get_name(dtb, node, NULL);
++	if (!name || strcmp(name, "watchdog@ff848000"))
++		return false;
++	status = fdt_getprop(dtb, node, "status", NULL);
++	return !status || !strcmp(status, "okay") || !strcmp(status, "ok");
++}
++
+ static void nova_boot_stock(struct blk_desc *desc)
+ {
+ 	ulong saddr = env_get_hex("scratch_addr_r", 0), caddr = env_get_hex("kernel_comp_addr_r", 0);
+@@ -1694,16 +1726,6 @@ static void nova_boot_stock(struct blk_desc *desc)
+ 
+ 	if (!saddr || !caddr || !faddr || !line || !parm)
+ 		goto out;
+-	rlen = nova_krnl(desc, CONFIG_NOVA_BACKUP_LBA, s, STOCK_RAMDISK_MAX, "stock ramdisk (backup)");
+-	if (!rlen)
+-		goto out;
+-	memmove(map_sysmem(STOCK_RAMDISK_AT, rlen), s + KRNL_HDR, rlen);
+-	klen = nova_krnl(desc, CONFIG_NOVA_KERNEL_LBA, c, SZ_64M - SZ_4K, "stock kernel (kernel)");
+-	if (!klen || klen < SZ_4K || get_unaligned_le32(c + KRNL_HDR + 0x38) != 0x644d5241) {
+-		nlog("stock kernel: not an arm64 Image");
+-		goto out;
+-	}
+-	memmove(map_sysmem(STOCK_KERNEL_AT, klen), c + KRNL_HDR, klen);
+ 	if (nova_read(desc, CONFIG_NOVA_RESOURCE_LBA, 1, s, "resource"))
+ 		goto out;
+ 	tbl = nova_rsce_table_bytes(s);
+@@ -1716,26 +1738,28 @@ static void nova_boot_stock(struct blk_desc *desc)
+ 	}
+ 	memmove(map_sysmem(faddr, size), s, size);
+ 	dtb = map_sysmem(faddr, size);
+-	if (nova_bench == NOVA_BENCH_STOCK) {
+-		/*
+-		 * The stock firmware's kernel keeps a running watchdog fed from a kernel timer for as
+-		 * long as nothing holds /dev/watchdog open, and nothing in the stock firmware opens it,
+-		 * so the bench's watchdog could never end the run. Its node off, in the copy
+-		 * in RAM only: the stock kernel leaves the watchdog alone and the reset comes 21.47 s
+-		 * after board_early_init_f restarted it.
+-		 */
+-		void *w = map_sysmem(faddr, size + SZ_4K);
+-		int node;
+-
+-		ret = fdt_open_into(w, w, size + SZ_4K);
+-		node = ret ? ret : fdt_node_offset_by_compatible(w, -1, "snps,dw-wdt");
+-		ret = node < 0 ? node : fdt_setprop_string(w, node, "status", "disabled");
+-		nlog("bench stock: the stock DTB's watchdog node %s disabled in RAM: %d",
+-		     node < 0 ? "?" : fdt_get_name(w, node, NULL), ret);
+-		if (ret)
+-			goto out;
+-		dtb = w;
++	if (nova_stock_dtb_wdt(dtb)) {
++		bool was = nova_wdog_armed;
++
++		if (!was)
++			nova_wdog_arm();
++		nlog("stock firmware: the watchdog %s (WDT_CR %08x, TORR %08x): the stock DTB's watchdog@ff848000 "
++		     "is enabled, so the stock kernel's dw_wdt keeps it fed", was ? "counting" : "armed",
++		     readl(WDT_CR), readl(WDT_TORR));
++	} else {
++		nlog("stock firmware: the stock DTB has no enabled watchdog@ff848000, so the stock kernel would not "
++		     "feed one: the watchdog %s", nova_wdog_armed ? "counting (a kexec entry's)" : "left off");
+ 	}
++	rlen = nova_krnl(desc, CONFIG_NOVA_BACKUP_LBA, s, STOCK_RAMDISK_MAX, "stock ramdisk (backup)");
++	if (!rlen)
++		goto out;
++	memmove(map_sysmem(STOCK_RAMDISK_AT, rlen), s + KRNL_HDR, rlen);
++	klen = nova_krnl(desc, CONFIG_NOVA_KERNEL_LBA, c, SZ_64M - SZ_4K, "stock kernel (kernel)");
++	if (!klen || klen < SZ_4K || get_unaligned_le32(c + KRNL_HDR + 0x38) != 0x644d5241) {
++		nlog("stock kernel: not an arm64 Image");
++		goto out;
++	}
++	memmove(map_sysmem(STOCK_KERNEL_AT, klen), c + KRNL_HDR, klen);
+ 	if (nova_read(desc, CONFIG_NOVA_PARM_LBA, 4, s, "PARM"))
+ 		goto out;
+ 	ret = nova_parm_cmdline(s, 4 * SECTOR, parm, NOVA_CMDLINE_MAX);
+@@ -2050,8 +2074,9 @@ static enum nova_bench nova_bench_word(const void *x0)
+  *   slot:  the try of a chain image in the slot: its own U-Boot booted by `booti`, handed the slot
+  *          (nova_attempt -> nova_chainload), which boots the slot's FIT (nova_chained), with the
+  *          command line and words of the ladder's first try of the slot;
+- *   stock: the stock firmware from backup, kernel and resource (nova_boot_stock), its DTB's
+- *          watchdog node off in RAM so that the watchdog ends the run.
++ *   stock: the stock firmware from backup, kernel and resource (nova_boot_stock), exactly as the
++ *          stock rung boots it: its DTB as the card holds it, so the stock kernel keeps the
++ *          watchdog fed and the stock firmware stays up until it is restarted.
+  */
+ static void __noreturn nova_bench_boot(const void *x0)
+ {

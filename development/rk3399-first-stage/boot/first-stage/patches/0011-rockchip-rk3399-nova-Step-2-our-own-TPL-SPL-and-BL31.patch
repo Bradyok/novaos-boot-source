@@ -1,0 +1,1657 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Brady <brady@aioscilloscope.com>
+Date: Wed, 28 Oct 2026 12:00:00 +0000
+Subject: [PATCH 11/11] rockchip: rk3399: nova: Step 2, our own TPL, SPL and
+ BL31 before this U-Boot proper
+
+Copyright (C) 2026 Olympian LED, Inc.
+
+A third build of the Rigol DHO800/DHO900 and MHO900 board,
+nova-mainline.config merged over nova-<family>-rk3399_defconfig: the
+card's whole boot chain from source. TPL (the LPDDR4 init,
+rk3399-sdram-lpddr4-100.dtsi) and SPL go to card LBA 64 as
+idbloader.img, this U-Boot proper with TF-A's BL31 and the control DT to
+LBA 2048 as u-boot.itb, in the zero gap before vendor storage, never at
+the default 0x4000 (the scope's uboot partition). The Maskrom images
+(ROCKCHIP_MASKROM_IMAGE) run the same chain from RAM.
+
+It is the chainload's U-Boot proper, with the same board file, ladder
+and FIT path: the I-cache, the MMU and the D-cache on before the device
+model's scan (BL31 enters it uncached, as the stock U-Boot entered the
+chainload: board_f 0.65 s -> 0.03 s there), the LZ4 FIT held to its
+header's length and crc32, the attempt record in PMUGRF OS_REG1, the
+watchdog, the silent console recorded into the pmsg zone. What the stock
+U-Boot did before it started the chainload is done here
+(nova_stock.{c,h}, pure logic a host program builds alone):
+
+- the reboot flag in PMUGRF OS_REG0, read in board_early_init_f: low
+  byte 1 and 0x1888aaff are Loader mode, 3 boots recovery first, 6 and 7
+  (the stock "wipe data") and everything else a normal boot;
+- on a normal boot, Run/Stop at power-on: SPL opens the front panel's
+  UART0 (1,500,000 baud, GPIO2_C0/C1 only) before it loads U-Boot and
+  records when, so every frame from then on waits in the receive FIFO;
+  U-Boot reads them all and listens on until NOVA_RUNSTOP_WINDOW_MS
+  (50 ms, the stock window) after the open, a deadline, not a fixed wait
+  of its own. A press or release (FA 08 0C 34 AF, FA 08 00 58 AF)
+  anywhere in the stream is Loader mode; otherwise the power-on-mode
+  frame FA 05 05 0A AF (auto) goes to the panel;
+- the card's PARM must be the committed table (NOVA_PARM_BYTES,
+  NOVA_PARM_CRC32), or Loader mode; its CMDLINE is the stock loader's,
+  the parameter partition first on a recovery boot;
+- on a normal boot the misc message at misc + 16 KiB (only there:
+  boot-recovery starts at recovery); nothing writes misc;
+- boot, recovery, backup in the stock order: Rigol's Android from a KRNL
+  container (the ramdisk from that partition, the kernel from kernel,
+  rk-kernel.dtb from resource); a plain NovaOS image held to its id; a
+  chain image by the ladder, with the watchdog armed right there, where
+  the stock U-Boot would have started the chainloaded one, so the same
+  span of the boot runs under it in both steps. Every reset the ladder
+  makes comes back to this stock order, which reads the flag it left as
+  the stock U-Boot does;
+- Loader mode: Rockusb on OTG0, the rear USB device port, no timeout.
+
+No OP-TEE runs: the DRAM banks keep the region the chainload cuts out.
+The kernel's command line is built here as the stock U-Boot builds it,
+without its logo word (no logo is drawn).
+
+TPL honors BOOT_BROM_DOWNLOAD in OS_REG0 (ROCKCHIP_BOOT_MODE_REG), and
+U-Boot proper never writes it (ROCKCHIP_DOWNLOAD_KEY off). TPL, SPL and
+BL31 are quiet (no banners, no DRAM report, BL31 at its errors-only log
+level). TPL's and SPL's bootstage records are stashed at 0x1f0000 and
+U-Boot proper puts them, with its own, in the kernel's /bootstage, so a
+boot shows every stage's time; SPL's record of UART0's open sits beside
+them at 0x1f1000. Both are in the free RAM below 2 MiB: above the first
+MiB, which BL31 makes secure, and the ramoops area, and below U-Boot's
+and Linux's RAM.
+
+Signed-off-by: Brady <brady@aioscilloscope.com>
+---
+ arch/arm/dts/rk3399-nova-rigol-u-boot.dtsi   |  19 +
+ arch/arm/dts/rk3399-nova-rigol.dtsi          |  26 +
+ arch/arm/mach-rockchip/rk3399/Kconfig        |   7 +-
+ board/rigol/nova_rk3399/Kconfig              |  66 ++-
+ board/rigol/nova_rk3399/Makefile             |  10 +-
+ board/rigol/nova_rk3399/nova-mainline.config |  71 +++
+ board/rigol/nova_rk3399/nova_rk3399.c        | 519 +++++++++++++++----
+ board/rigol/nova_rk3399/nova_stock.c         | 122 +++++
+ board/rigol/nova_rk3399/nova_stock.h         | 100 ++++
+ board/rigol/nova_rk3399/nova_uart0.c         | 166 ++++++
+ board/rigol/nova_rk3399/nova_uart0.h         |  28 +
+ configs/nova-dho900-rk3399_defconfig         |   2 +-
+ configs/nova-mho900-rk3399_defconfig         |   2 +-
+ 13 files changed, 1014 insertions(+), 124 deletions(-)
+ create mode 100644 board/rigol/nova_rk3399/nova-mainline.config
+ create mode 100644 board/rigol/nova_rk3399/nova_stock.c
+ create mode 100644 board/rigol/nova_rk3399/nova_stock.h
+ create mode 100644 board/rigol/nova_rk3399/nova_uart0.c
+ create mode 100644 board/rigol/nova_rk3399/nova_uart0.h
+
+diff --git a/arch/arm/dts/rk3399-nova-rigol-u-boot.dtsi b/arch/arm/dts/rk3399-nova-rigol-u-boot.dtsi
+index 4bc68abf..d33ead88 100644
+--- a/arch/arm/dts/rk3399-nova-rigol-u-boot.dtsi
++++ b/arch/arm/dts/rk3399-nova-rigol-u-boot.dtsi
+@@ -5,10 +5,19 @@
+  * UART2's 24 MHz clock), then this board's aliases: mmc0 is the SD card, as in the NovaOS
+  * kernel DT, and nothing else is numbered.
+  *
++ * Built for Step 2 (NOVA_RK3399_MAINLINE), the same tree also carries what TPL and SPL need: the
++ * LPDDR4 timing set (PMUGRF OS_REG2 reads 0x32C1F2C1 on these boards: LPDDR4, 2 channels x 32
++ * bit, 1 rank, 4 GiB; rk3399-sdram-lpddr4-100.dtsi is the only LPDDR4 set in the tree, and the
++ * driver detects rank, column, bank and row itself), the console in every phase, and the SD card
++ * as SPL's boot medium.
++ *
+  * Copyright (C) 2026 Olympian LED, Inc.
+  */
+ 
+ #include "rk3399-u-boot.dtsi"
++#ifdef CONFIG_NOVA_RK3399_MAINLINE
++#include "rk3399-sdram-lpddr4-100.dtsi"
++#endif
+ 
+ / {
+ 	aliases {
+@@ -19,6 +28,16 @@
+ 	};
+ 
+ 	chosen {
++#ifdef CONFIG_NOVA_RK3399_MAINLINE
++		u-boot,spl-boot-order = "same-as-spl", &sdmmc;
++#else
+ 		/delete-property/ u-boot,spl-boot-order;
++#endif
+ 	};
+ };
++
++#ifdef CONFIG_NOVA_RK3399_MAINLINE
++&uart2 {
++	bootph-all;
++};
++#endif
+diff --git a/arch/arm/dts/rk3399-nova-rigol.dtsi b/arch/arm/dts/rk3399-nova-rigol.dtsi
+index 01a39c36..8e9c2130 100644
+--- a/arch/arm/dts/rk3399-nova-rigol.dtsi
++++ b/arch/arm/dts/rk3399-nova-rigol.dtsi
+@@ -96,3 +96,29 @@
+ &{/display-subsystem} {
+ 	status = "disabled";
+ };
++
++#ifdef CONFIG_NOVA_RK3399_MAINLINE
++/*
++ * Step 2's Loader mode: Rockusb on OTG0, the rear USB device connector, high speed only. Step 1
++ * leaves Loader mode to the stock loaders.
++ */
++&u2phy0 {
++	status = "okay";
++};
++
++&u2phy0_otg {
++	status = "okay";
++};
++
++&usbdrd3_0 {
++	status = "okay";
++};
++
++&usbdrd_dwc3_0 {
++	dr_mode = "peripheral";
++	maximum-speed = "high-speed";
++	phys = <&u2phy0_otg>;
++	phy-names = "usb2-phy";
++	status = "okay";
++};
++#endif
+diff --git a/arch/arm/mach-rockchip/rk3399/Kconfig b/arch/arm/mach-rockchip/rk3399/Kconfig
+index 21438f8c..0651da70 100644
+--- a/arch/arm/mach-rockchip/rk3399/Kconfig
++++ b/arch/arm/mach-rockchip/rk3399/Kconfig
+@@ -36,9 +36,10 @@ config TARGET_NOVA_RIGOL_RK3399
+ 	  The Rigol DHO800/DHO900 and MHO900 oscilloscopes (RK3399, LPDDR4,
+ 	  boot medium an SD card on sdmmc, console UART2 at 115200), as the
+ 	  NovaOS U-Boot proper: a kexec test payload, or the loader Rigol's
+-	  stock U-Boot chainloads from the recovery partition. U-Boot proper
+-	  only (make u-boot.bin): DRAM, BL31 and OP-TEE are the stock
+-	  loaders'.
++	  stock U-Boot chainloads from the recovery partition (U-Boot proper
++	  only, make u-boot.bin: DRAM, BL31 and OP-TEE are the stock
++	  loaders'), or with TPL, SPL and TF-A's BL31 the card's whole boot
++	  chain (board/rigol/nova_rk3399/nova-mainline.config).
+ 
+ config TARGET_PINEBOOK_PRO_RK3399
+ 	bool "Pinebook Pro"
+diff --git a/board/rigol/nova_rk3399/Kconfig b/board/rigol/nova_rk3399/Kconfig
+index 2070af5a..c52fd66c 100644
+--- a/board/rigol/nova_rk3399/Kconfig
++++ b/board/rigol/nova_rk3399/Kconfig
+@@ -17,7 +17,8 @@ config BOARD_SPECIFIC_OPTIONS
+ 	def_bool y
+ 	select ROCKCHIP_LINUX_KERNEL_IMAGE_HEADER
+ 	select POSITION_INDEPENDENT
+-	select SAVE_PREV_BL_FDT_ADDR
++	# x0 is the previous stage's FDT under the stock U-Boot and kexec; BL31 passes none (Step 2)
++	select SAVE_PREV_BL_FDT_ADDR if !NOVA_RK3399_MAINLINE
+ 	select LZ4
+ 	select CONSOLE_RECORD
+ 
+@@ -55,8 +56,31 @@ config NOVA_RK3399_CHAINLOAD
+ 	  kernel, leaves the record alone and on any failure resets
+ 	  plainly.
+ 
++config NOVA_RK3399_MAINLINE
++	bool "Step 2: TPL, SPL and TF-A BL31 of our own load it from the card"
++	select SHA1
++	select OF_BOARD_SETUP
++	select OF_BOARD_SETUP_EXTENDED
++	help
++	  The whole chain from source: TPL (the LPDDR4 init) and SPL at
++	  card LBA 64, this U-Boot proper and TF-A's BL31 as u-boot.itb at
++	  LBA 2048. `nova boot` does what the scope's systems expect of
++	  their loader -- the reboot flag in PMUGRF OS_REG0, Run/Stop at
++	  power-on into Loader mode (Rockusb), the power-on-mode frame to
++	  the front panel, the misc message at misc + 16 KiB, the partitions
++	  boot, recovery and backup in the stock order, Rigol's Android
++	  from its KRNL containers -- and boots NovaOS by the same ladder
++	  and the same LZ4 FIT as NOVA_RK3399_CHAINLOAD, with no other
++	  U-Boot in between.
++
+ endchoice
+ 
++config NOVA_RK3399_LADDER
++	def_bool NOVA_RK3399_CHAINLOAD || NOVA_RK3399_MAINLINE
++	help
++	  The ladder of NovaOS images (nova_chain.c) and the FIT boot: both
++	  the chainloaded U-Boot and the one SPL loads.
++
+ config NOVA_BUILD_ID
+ 	string "Build identifier logged at entry"
+ 	default "unknown"
+@@ -139,4 +163,44 @@ config NOVA_FIT_MAX
+ 	hex "Largest FIT read from a slot"
+ 	default 0x4000000
+ 
++if NOVA_RK3399_MAINLINE
++
++config NOVA_MISC_BCB_LBA
++	hex "Card LBA of the misc message read (misc + 16 KiB)"
++	default 0x8020
++	help
++	  The PARM table's misc (0x2000@0x6000) plus 0x2000, plus 32
++	  sectors. Offset 0 of misc is never read.
++
++config NOVA_PARM_BYTES
++	hex "Bytes of the card's PARM block that must be the committed table"
++	default 0x3ae
++
++config NOVA_PARM_CRC32
++	hex "crc32 of those bytes"
++	default 0x4a377dc5
++	help
++	  The card's first PARM copy (NOVA_PARM_LBA) must be the table every
++	  LBA here comes from, byte for byte; otherwise Loader mode.
++
++config NOVA_RUNSTOP_WINDOW_MS
++	int "How long Run/Stop is listened for, from when SPL opened UART0 (ms)"
++	default 50
++	help
++	  SPL opens the front-panel UART0 before it loads U-Boot proper, so
++	  every frame sent from then on waits in the receive FIFO. U-Boot
++	  proper reads them all, and listens on until this long after the
++	  open, for a Run/Stop press or release anywhere in the stream.
++	  50 ms is the stock loader's own window.
++
++config NOVA_SPL_HANDOFF_ADDR
++	hex "Where SPL records when it opened UART0, for U-Boot proper"
++	default 0x1f1000
++	help
++	  16 bytes in the free RAM below 2 MiB: above the secure first MiB
++	  and the ramoops area (0x110000-0x1effff), beside the bootstage
++	  stash (BOOTSTAGE_STASH_ADDR), below U-Boot's and Linux's RAM.
++
++endif
++
+ endif
+diff --git a/board/rigol/nova_rk3399/Makefile b/board/rigol/nova_rk3399/Makefile
+index 3ea86ed5..a2f90b77 100644
+--- a/board/rigol/nova_rk3399/Makefile
++++ b/board/rigol/nova_rk3399/Makefile
+@@ -2,5 +2,13 @@
+ #
+ # Copyright (C) 2026 Olympian LED, Inc.
+ 
++ifdef CONFIG_XPL_BUILD
++# SPL opens the front panel's UART0; TPL has nothing of this board
++ifndef CONFIG_TPL_BUILD
++obj-$(CONFIG_NOVA_RK3399_MAINLINE) += nova_uart0.o
++endif
++else
+ obj-y += nova_rk3399.o
+-obj-$(CONFIG_NOVA_RK3399_CHAINLOAD) += nova_chain.o
++obj-$(CONFIG_NOVA_RK3399_LADDER) += nova_chain.o
++obj-$(CONFIG_NOVA_RK3399_MAINLINE) += nova_stock.o nova_uart0.o
++endif
+diff --git a/board/rigol/nova_rk3399/nova-mainline.config b/board/rigol/nova_rk3399/nova-mainline.config
+new file mode 100644
+index 00000000..94824358
+--- /dev/null
++++ b/board/rigol/nova_rk3399/nova-mainline.config
+@@ -0,0 +1,71 @@
++# Copyright (C) 2026 Olympian LED, Inc.
++# Step 2, the card's whole chain from source (TPL, SPL, TF-A BL31 and this U-Boot proper): merged over a
++# nova-*-rk3399_defconfig. `make` builds idbloader.img (TPL + SPL), u-boot.itb (U-Boot proper, BL31, the
++# control DT), u-boot-rockchip.bin and the Maskrom images u-boot-rockchip-usb471.bin / -usb472.bin.
++# CONFIG_NOVA_RK3399_KEXEC_TEST is not set
++# CONFIG_NOVA_RK3399_CHAINLOAD is not set
++CONFIG_NOVA_RK3399_MAINLINE=y
++CONFIG_BOOTCOMMAND="nova boot"
++CONFIG_CC_OPTIMIZE_LIBS_FOR_SPEED=y
++# the reboot flag and the attempt record read in board_early_init_f, before anything can write them
++CONFIG_BOARD_EARLY_INIT_F=y
++# Room in the kernel's FDT for /bootstage (ft_board_setup_ex grows the tree into it).
++CONFIG_SYS_FDT_PAD=0x8000
++CONFIG_TEXT_BASE=0x00200000
++# x0 from BL31 is no FDT (the family defconfig's default flavor selected this, and a visible symbol keeps its value)
++# CONFIG_SAVE_PREV_BL_FDT_ADDR is not set
++# TPL: the LPDDR4 init (rk3399-sdram-lpddr4-100.dtsi; rank, column, bank and row detected), no rkbin blob
++CONFIG_TPL=y
++CONFIG_RAM_ROCKCHIP_LPDDR4=y
++# CONFIG_RAM_ROCKCHIP_DEBUG is not set
++# TPL honors BOOT_BROM_DOWNLOAD in PMUGRF OS_REG0 (back to the BootROM's download mode); U-Boot proper never
++# writes it (no download key)
++CONFIG_ROCKCHIP_BOOT_MODE_REG=0xff320300
++# CONFIG_ROCKCHIP_DOWNLOAD_KEY is not set
++# SPL: u-boot.itb at card LBA 2048, in the zero gap LBA 533-7167, never the default 0x4000 (the uboot partition)
++CONFIG_SPL_MAX_SIZE=0x40000
++CONFIG_SPL_PAD_TO=0xf8000
++# CONFIG_SPL_RAW_IMAGE_SUPPORT is not set
++CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_USE_SECTOR=y
++CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR=0x800
++CONFIG_SPL_OF_CONTROL=y
++CONFIG_OF_SPL_REMOVE_PROPS="clock-names interrupt-parent assigned-clocks assigned-clock-rates assigned-clock-parents"
++# BL31 gets the FDT, and with it the console's 115200 from /chosen/stdout-path
++# CONFIG_SPL_ATF_NO_PLATFORM_PARAM is not set
++CONFIG_ROCKCHIP_MASKROM_IMAGE=y
++# quiet: no banners, no DRAM report (TPL_/SPL_SILENT_CONSOLE follow SILENT_CONSOLE); U-Boot proper's own
++# output goes to its console record and the pmsg zone (silent=1). TPL keeps its error lines on UART2 through the
++# debug UART (it has no other console): a failed LPDDR4 training must say so.
++CONFIG_DEBUG_UART=y
++CONFIG_DEBUG_UART_BASE=0xFF1A0000
++CONFIG_DEBUG_UART_CLOCK=24000000
++CONFIG_DEBUG_UART_SHIFT=2
++# CONFIG_DEBUG_UART_ANNOUNCE is not set
++# CONFIG_SPL_BANNER_PRINT is not set
++# CONFIG_TPL_BANNER_PRINT is not set
++# CONFIG_SPL_DISPLAY_PRINT is not set
++# Loader mode: Rockusb on OTG0, the rear USB device port (the stock Loader's job)
++CONFIG_CMD_ROCKUSB=y
++CONFIG_USB=y
++CONFIG_USB_DWC3=y
++CONFIG_USB_DWC3_GENERIC=y
++CONFIG_USB_GADGET=y
++CONFIG_USB_GADGET_DOWNLOAD=y
++CONFIG_USB_FUNCTION_ROCKUSB=y
++# CONFIG_USB_FUNCTION_FASTBOOT is not set
++CONFIG_PHY_ROCKCHIP_INNO_USB2=y
++CONFIG_DM_RESET=y
++# Resets by the CRU in every phase: TPL and SPL run before BL31, so the sysreset driver cannot be PSCI's (U-Boot
++# proper's own nova reset still asks BL31 by PSCI first, as in Step 1)
++# CONFIG_SYSRESET_PSCI is not set
++CONFIG_MMC_WRITE=y
++# every stage timed: TPL's and SPL's records stashed and taken over by U-Boot proper, which puts them all in
++# the kernel's /bootstage
++CONFIG_TPL_BOOTSTAGE=y
++CONFIG_SPL_BOOTSTAGE=y
++CONFIG_TPL_BOOTSTAGE_RECORD_COUNT=5
++CONFIG_SPL_BOOTSTAGE_RECORD_COUNT=10
++CONFIG_BOOTSTAGE_RECORD_COUNT=50
++CONFIG_BOOTSTAGE_STASH=y
++CONFIG_BOOTSTAGE_STASH_ADDR=0x1f0000
++CONFIG_BOOTSTAGE_STASH_SIZE=0x1000
+diff --git a/board/rigol/nova_rk3399/nova_rk3399.c b/board/rigol/nova_rk3399/nova_rk3399.c
+index f917aa6b..00c0eb4e 100644
+--- a/board/rigol/nova_rk3399/nova_rk3399.c
++++ b/board/rigol/nova_rk3399/nova_rk3399.c
+@@ -4,7 +4,7 @@
+  *
+  * Copyright (C) 2026 Olympian LED, Inc.
+  *
+- * One board, two builds (board/rigol/nova_rk3399/Kconfig, NOVA_RK3399_FLAVOR):
++ * One board, three builds (board/rigol/nova_rk3399/Kconfig, "What this U-Boot proper is for"):
+  *
+  *  - kexec test (NOVA_RK3399_KEXEC_TEST): a running NovaOS loads u-boot.bin with
+  *    kexec_file_load(2) while the RK3399 watchdog keeps counting. `nova kexec-test` checks
+@@ -20,6 +20,13 @@
+  *    (nova_chain.h); when no NovaOS image comes up, the stock firmware. The same build also runs
+  *    kexec'd from a running NovaOS with the FIT as the kexec initrd: Step 1's boot measured with
+  *    nothing written to the card (the watchdog already counting at entry tells it apart).
++ *  - Step 2 (NOVA_RK3399_MAINLINE): our own TPL, SPL and TF-A BL31 start this U-Boot from the card
++ *    (u-boot.itb at LBA 2048) at EL2, x0 holding no FDT, no OP-TEE resident. `nova boot` does what
++ *    the scope's systems expect of their loader (nova_stock.h: the reboot flag, Run/Stop on the
++ *    front panel's UART0, the power-on-mode frame, the misc message at misc + 16 KiB, the partitions
++ *    boot, recovery and backup in the stock order, Rigol's Android from its KRNL containers, Loader
++ *    mode as Rockusb), and boots the chain image it reaches by the chainload's own ladder and FIT
++ *    path, with no other U-Boot in between.
+  *
+  * The numbers below are the scope's own: its card layout, its RAM map, its reboot flags and
+  * how its stock boot loader hands over to a kernel.
+@@ -58,10 +65,14 @@
+ #include <linux/string.h>
+ #include <u-boot/crc.h>
+ #include <u-boot/lz4.h>
+-#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
++#if IS_ENABLED(CONFIG_NOVA_RK3399_LADDER)
+ #include <u-boot/sha1.h>
+ #include "nova_chain.h"
+ #endif
++#if IS_ENABLED(CONFIG_NOVA_RK3399_MAINLINE)
++#include "nova_stock.h"
++#include "nova_uart0.h"
++#endif
+ 
+ DECLARE_GLOBAL_DATA_PTR;
+ 
+@@ -451,7 +462,7 @@ static __maybe_unused void nova_reserve(phys_addr_t base, phys_size_t size, cons
+  * the kexec'd kernel's (Step 0), or the stock U-Boot's, whose /chosen/bootargs is the line
+  * it built (Step 1).
+  */
+-static const void *prev_fdt(void)
++static __maybe_unused const void *prev_fdt(void)
+ {
+ 	phys_addr_t a = get_prev_bl_fdt_addr();
+ 	const void *fdt;
+@@ -673,14 +684,15 @@ int arch_setup_dest_addr(void)
+ 
+ /* ------------------------------------------------------------------ the caches before relocation */
+ 
+-#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
++#if IS_ENABLED(CONFIG_NOVA_RK3399_LADDER)
+ /*
+  * U-Boot proper is entered as the arm64 boot protocol enters a kernel, with the MMU and the
+  * D-cache off, and here the I-cache off too (SCTLR_EL2 at its reset value), and U-Boot turns them
+  * on only in board_r (enable_caches). Until then every instruction fetch and every load and store
+  * goes to DRAM uncached: with the A53 cluster at 816 MHz, board_f took 0.63-0.71 s, most of it the
+  * device model's pre-relocation scan of the control DT (0.35 s), the console's and the RAM sizer's
+- * probes and arch_setup_dest_addr's walk of the previous stage's FDT. So the chainload turns the
++ * probes and arch_setup_dest_addr's walk of the previous stage's FDT. TF-A's BL31 enters Step 2's
++ * U-Boot the same way (SCTLR_EL2 at its reset value). So the chainload and Step 2 turn the
+  * I-cache, the MMU and the D-cache on before the device model starts (mach_cpu_init, the first
+  * hook after fdtdec_setup), with page tables for U-Boot's own map (mem_map) in .data, as the i.MX8M
+  * SoC code does. relocate_code already copes with the caches on (it cleans the copy to the point of
+@@ -749,6 +761,11 @@ static void nova_caches_report(void)
+ 
+ /* What OS_REG1 held when this U-Boot started (before anything here wrote it). */
+ static u32 nova_os_reg1_at_entry __section(".data");
++/*
++ * What OS_REG0 held then: Step 2's reboot flag (with a boot mode register, board_late_init's
++ * setup_boot_mode() writes BOOT_NORMAL over it).
++ */
++static __maybe_unused u32 nova_os_reg0_at_entry __section(".data");
+ /* board_early_init_f armed (or restarted) the watchdog */
+ static __maybe_unused bool nova_wdog_armed __section(".data");
+ /* The watchdog was counting when board_early_init_f ran: entered from a running system */
+@@ -758,23 +775,17 @@ static void nova_entered(void)
+ {
+ 	nlog("entered: %s (%s), EL%u, x0 %llx, os_reg0 %08x, os_reg1 %08x, glb_rst_st %08x, ram %llx, reloc %lx, "
+ 	     "%s, loaded at %lx", CONFIG_NOVA_BUILD_ID,
++	     IS_ENABLED(CONFIG_NOVA_RK3399_MAINLINE) ? "mainline" :
+ 	     IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD) ? "chainload" : "kexec-test",
+-	     current_el(), (unsigned long long)get_prev_bl_fdt_addr(), readl(PMUGRF_OS_REG0),
++	     current_el(), (unsigned long long)get_prev_bl_fdt_addr(),
++	     IS_ENABLED(CONFIG_BOARD_EARLY_INIT_F) ? nova_os_reg0_at_entry : readl(PMUGRF_OS_REG0),
+ 	     IS_ENABLED(CONFIG_BOARD_EARLY_INIT_F) ? nova_os_reg1_at_entry : readl(PMUGRF_OS_REG1),
+ 	     readl(CRU_GLB_RST_ST), (unsigned long long)gd->ram_size, gd->relocaddr,
+ 	     CONFIG_DEFAULT_DEVICE_TREE, nova_loaded_at);
+ }
+ 
+-/*
+- * The earliest board hook (board_f, before relocation and before the console). The chainload flavor
+- * arms the watchdog here at its longest timeout, so a hang anywhere after this point -- in this
+- * U-Boot, or in a kernel before it takes the watchdog over -- ends in a reset instead of a dark scope.
+- * Not yet when the record says the stock firmware is booted this time: nothing but a reset stops a
+- * watchdog, so it is armed only once the stock DTB has shown that the stock kernel will feed it
+- * (nova_boot_stock). The kexec test leaves the watchdog to its own one restart (`nova kexec-test`).
+- */
+-#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
+-/* Arm the watchdog at its longest timeout, or restart it when it is counting already. */
++#if IS_ENABLED(CONFIG_NOVA_RK3399_LADDER)
++/* The watchdog at its longest timeout (21.47 s), or restarted when it is counting already. */
+ static void nova_wdog_arm(void)
+ {
+ 	writel(WDT_TORR_MAX, WDT_TORR);
+@@ -782,11 +793,36 @@ static void nova_wdog_arm(void)
+ 	writel(WDT_CRR_KICK, WDT_CRR);
+ 	nova_wdog_armed = true;
+ }
++
++/*
++ * The record says the stock firmware is booted this time: the watchdog is not armed for it here, only
++ * in nova_boot_stock, once the stock DTB shows that the stock kernel feeds it.
++ */
++static bool nova_rec_is_stock(u32 rec)
++{
++	enum nova_rec_kind kind;
++	int pos;
++	u8 tag;
++
++	return nova_rec_parse(rec, &kind, &pos, &tag) && kind == NOVA_REC_STOCK;
++}
+ #endif
+ 
++/*
++ * The earliest board hook (board_f, before relocation and before the console): the reboot flag and
++ * the attempt record as the previous stages left them. The chainload flavor arms the watchdog here
++ * at its longest timeout, so a hang anywhere after this point -- in this U-Boot, or in a kernel
++ * before it takes the watchdog over -- ends in a reset instead of a dark scope. Not yet when the
++ * record says the stock firmware is booted this time: nothing but a reset stops a watchdog, so it
++ * is armed only once the stock DTB has shown that the stock kernel will feed it (nova_boot_stock).
++ * Step 2 arms it where the stock U-Boot would have started the chainloaded one: when the stock
++ * order reaches a chain image (nova_chain_from_card), so the same span of the boot runs under it in
++ * both steps. The kexec test leaves the watchdog to its own one restart (`nova kexec-test`).
++ */
+ int board_early_init_f(void)
+ {
+ 	nova_os_reg1_at_entry = readl(PMUGRF_OS_REG1);
++	nova_os_reg0_at_entry = readl(PMUGRF_OS_REG0);
+ #if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
+ 	/*
+ 	 * Counting already: a reset stops the watchdog and the stock loaders never start it, so this
+@@ -794,15 +830,8 @@ int board_early_init_f(void)
+ 	 * committed U-Boot handing over a slot (CHAIN_PROP in x0, nova_chained). Read before arming.
+ 	 */
+ 	nova_kexec_entry = readl(WDT_CR) & WDT_CR_EN;
+-	{
+-		enum nova_rec_kind kind;
+-		int pos;
+-		u8 tag;
+-
+-		if (nova_rec_parse(nova_os_reg1_at_entry, &kind, &pos, &tag) && kind == NOVA_REC_STOCK)
+-			return 0;
+-	}
+-	nova_wdog_arm();
++	if (!nova_rec_is_stock(nova_os_reg1_at_entry))
++		nova_wdog_arm();
+ #endif
+ 	return 0;
+ }
+@@ -1116,9 +1145,9 @@ lz4:
+ 
+ #endif /* CONFIG_NOVA_RK3399_KEXEC_TEST */
+ 
+-/* ------------------------------------------------------------------ Step 1: the chainload */
++/* ------------------------------------------------------------------ the chain (Steps 1 and 2) */
+ 
+-#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
++#if IS_ENABLED(CONFIG_NOVA_RK3399_LADDER)
+ 
+ /*
+  * THE CHAIN (nova_chain.h has the ladder and the record). The stock U-Boot loads this U-Boot from
+@@ -1137,6 +1166,12 @@ lz4:
+  * `boot` holds stock's boot image, else booted from `backup` by this U-Boot at the next entry, the
+  * watchdog armed once the stock DTB shows the stock kernel feeds it. Only a card that holds no stock
+  * boot image either ends in the stock Rockusb.
++ *
++ * In Step 2 no stock U-Boot runs: this U-Boot does its part (nova_stock.h) and, when the stock order
++ * reaches a chain image, runs the same ladder over the same card. Every reset the ladder makes then
++ * comes back to this U-Boot's stock order, which reads the flag the ladder left exactly as the
++ * stock U-Boot does: `recovery` first for FLAG_RECOVERY, Loader mode for FLAG_LOADER, `boot` first
++ * for FLAG_NORMAL.
+  */
+ 
+ /* The stock reboot flags (PMUGRF OS_REG0): a normal boot, Rockusb with no timeout, boot `recovery`. */
+@@ -1167,6 +1202,11 @@ struct nova_img {
+ /* The command lines: the one the stock U-Boot built (x0), recovery's DTB bootargs; read once. */
+ static char *nova_x0_line;
+ static char *nova_r_dtb;
++/*
++ * Step 2: the PARM's CMDLINE as the stock loader passes it to a boot of `boot`, and of `recovery`
++ * (the parameter partition first), from the card's own table (nova_parm_check).
++ */
++static __maybe_unused char *nova_parm_line, *nova_parm_rec;
+ 
+ /*
+  * The bench checks: a kexec entry whose command line carries nova.bench=slot or nova.bench=stock
+@@ -1337,7 +1377,7 @@ static bool nova_wdog_check(void)
+ 	udelay(20);
+ 	c1 = readl(WDT_CCVR);
+ 	writel(WDT_CRR_KICK, WDT_CRR);
+-	nlog("watchdog: %s at entry, WDT_CR %08x, TORR %08x, CCVR %08x -> %08x: %s",
++	nlog("watchdog: %s, WDT_CR %08x, TORR %08x, CCVR %08x -> %08x: %s",
+ 	     nova_wdog_armed ? "armed" : "not armed", cr, readl(WDT_TORR), c0, c1,
+ 	     nova_wdog_armed && (cr & WDT_CR_EN) && c1 < c0 ? "counting" : "NOT counting (no trial is made)");
+ 	return nova_wdog_armed && (cr & WDT_CR_EN) && c1 < c0;
+@@ -1464,6 +1504,7 @@ static int nova_load_v0(struct blk_desc *desc, const struct nova_img *x)
+ 	return 0;
+ }
+ 
++#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
+ /* A U-Boot binary that boots the slot it is handed (it carries the property's name). */
+ static bool nova_speaks_chain(const u8 *bin, ulong len)
+ {
+@@ -1475,6 +1516,7 @@ static bool nova_speaks_chain(const u8 *bin, ulong len)
+ 			return true;
+ 	return false;
+ }
++#endif
+ 
+ /* The appended FIT of chain image `x` at fit_addr_r, held to its header's length and crc32. */
+ static void *nova_fit(struct blk_desc *desc, const struct nova_img *x)
+@@ -1515,6 +1557,7 @@ static void nova_bootm(void *fit, const char *line)
+ 	nlog("bootm returned");
+ }
+ 
++#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
+ /*
+  * The slot's own U-Boot, entered as the stock U-Boot enters this one (an arm64 Image at EL2, x0 = an
+  * FDT): a copy of the FDT this U-Boot got, its /chosen naming the slot (CHAIN_PROP) and carrying the
+@@ -1557,35 +1600,39 @@ static void nova_chainload(const struct nova_img *x, const char *line)
+ 	run_command(cmd, 0);
+ 	nlog("booti returned");
+ }
++#endif
+ 
+ /*
+  * One attempt: image `x` for step `st`. A chain image boots its FIT (on trial, from the slot, through
+- * its own U-Boot); a plain NovaOS image boots raw with the DTB from its RSCE. The command line is the
+- * stock U-Boot's for `recovery` with the image's own DTB bootargs, and the chain words. Returns only
+- * when nothing was booted.
++ * its own U-Boot in Step 1); a plain NovaOS image boots raw with the DTB from its RSCE. The command
++ * line is the stock U-Boot's for `recovery` with the image's own DTB bootargs, and the chain words.
++ * In Step 2 it is built here the way the stock U-Boot builds it (the image's DTB bootargs, the PARM's
++ * CMDLINE, the stock loader's words; no logo word: no logo is drawn), and `st` NULL is a plain image
++ * the stock order reached, booted with no chain words, as the stock U-Boot would. Returns only when
++ * nothing was booted.
+  */
+ static void nova_attempt(struct blk_desc *desc, struct nova_img *x, const struct nova_step *st, bool own)
+ {
+ 	char *line = malloc(NOVA_CMDLINE_MAX);
+-	const char *xdtb, *fitline = NULL;
++	const char *xdtb;
+ 	void *dtb, *fit = NULL;
+ 	ulong kaddr = env_get_hex("kernel_addr_r", 0), raddr = env_get_hex("ramdisk_addr_r", 0);
+ 	ulong faddr = env_get_hex("fdt_addr_r", 0);
+ 	char cmd[96];
+-	int node, len;
+ 
+ 	if (!line)
+ 		return;
+ 	if (!x->android)
+ 		goto out;
+-	/* recovery is this U-Boot's own image: the stock U-Boot checked its id before it started it */
++	/* recovery is the chainload's own image: the stock U-Boot checked its id before it started it */
+ 	if (!own && nova_load_v0(desc, x))
+ 		goto out;
+ 	dtb = nova_second_dtb(desc, x, own);
+ 	if (!dtb)
+ 		goto out;
+ 	xdtb = nova_dtb_bootargs(dtb);
+-	if (x->chain && st->role == NOVA_ROLE_TRY && !own &&
++#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
++	if (x->chain && st && st->role == NOVA_ROLE_TRY && !own &&
+ 	    nova_speaks_chain(map_sysmem(kaddr, x->v.kernel_size), x->v.kernel_size)) {
+ 		if (nova_slot_cmdline(nova_x0_line, nova_r_dtb, xdtb, NULL, line, NOVA_CMDLINE_MAX) < 0) {
+ 			nlog("%s: no command line for it (x0 has none, or not one built from recovery's DTB)", x->name);
+@@ -1596,20 +1643,40 @@ static void nova_attempt(struct blk_desc *desc, struct nova_img *x, const struct
+ 		nova_chainload(x, line);
+ 		goto out;
+ 	}
++#endif
+ 	if (x->chain) {
+ 		fit = nova_fit(desc, x);
+ 		if (!fit)
+ 			goto out;
+-		node = fdt_path_offset(fit, "/configurations/" CONFIG_NOVA_FIT_CONFIG);
+-		fitline = node >= 0 ? fdt_getprop(fit, node, "nova,bootargs", &len) : NULL;
+-		if (fitline && (len < 1 || fitline[len - 1]))
+-			fitline = NULL;
+ 	}
+-	if (nova_slot_cmdline(nova_x0_line, nova_r_dtb, xdtb, fitline, line, NOVA_CMDLINE_MAX) < 0) {
+-		nlog("%s: no command line for it", x->name);
+-		goto out;
++#if IS_ENABLED(CONFIG_NOVA_RK3399_MAINLINE)
++	{
++		const char *parm = x->lba == CONFIG_NOVA_BOOT_LBA ? nova_parm_line : nova_parm_rec;
++
++		if (!parm || nova_stock_cmdline(xdtb, parm, NULL, line, NOVA_CMDLINE_MAX) < 0) {
++			nlog("%s: no command line for it", x->name);
++			goto out;
++		}
++	}
++#else
++	{
++		/* without x0's line, the one the image builder computed the same way (the FIT carries it) */
++		const char *fitline = NULL;
++		int node, len;
++
++		if (fit) {
++			node = fdt_path_offset(fit, "/configurations/" CONFIG_NOVA_FIT_CONFIG);
++			fitline = node >= 0 ? fdt_getprop(fit, node, "nova,bootargs", &len) : NULL;
++			if (fitline && (len < 1 || fitline[len - 1]))
++				fitline = NULL;
++		}
++		if (nova_slot_cmdline(nova_x0_line, nova_r_dtb, xdtb, fitline, line, NOVA_CMDLINE_MAX) < 0) {
++			nlog("%s: no command line for it", x->name);
++			goto out;
++		}
+ 	}
+-	if (nova_add_words(line, NOVA_CMDLINE_MAX, st) < 0)
++#endif
++	if (st && nova_add_words(line, NOVA_CMDLINE_MAX, st) < 0)
+ 		nlog("%s: the line is too long for the chain words: booted without them", x->name);
+ 	if (fit) {
+ 		nova_bootm(fit, line);
+@@ -1683,11 +1750,13 @@ static u32 nova_krnl(struct blk_desc *desc, lbaint_t lba, u8 *buf, u32 max, cons
+ }
+ 
+ /*
+- * The stock firmware, booted as the stock U-Boot boots `backup` holding stock's boot image: the
+- * ramdisk from `backup`'s KRNL container, the kernel from `kernel`'s, the DTB `rk-kernel.dtb` from
+- * `resource`, the command line from that DTB, the PARM's CMDLINE and the stock U-Boot's own words.
+- * Entered with the watchdog off (a record of kind STOCK: board_early_init_f did not arm it) or, on a
+- * kexec bench entry, counting. Returns only on failure.
++ * The stock firmware, booted as the stock U-Boot boots a partition holding stock's boot image
++ * (`backup` for the chain's stock rung; `boot`, `recovery` or `backup` in Step 2's stock order, at
++ * `lba`): the ramdisk from its KRNL container, the kernel from `kernel`'s, the DTB `rk-kernel.dtb`
++ * from `resource`, the command line from that DTB, the PARM's CMDLINE (the parameter partition
++ * first for `recovery`) and the stock U-Boot's own words. Entered with the watchdog off (a record
++ * of kind STOCK: board_early_init_f did not arm it; or Step 2's stock order) or, on a kexec bench
++ * entry, counting. Returns only on failure.
+  *
+  * The watchdog: the stock 4.4 kernel's dw_wdt (the legacy driver, before the watchdog core) keeps a
+  * counting watchdog fed from a kernel timer for as long as nothing holds /dev/watchdog open, and
+@@ -1697,6 +1766,7 @@ static u32 nova_krnl(struct blk_desc *desc, lbaint_t lba, u8 *buf, u32 max, cons
+  * otherwise last until a power cycle -- but only when the stock DTB's watchdog@ff848000 is enabled:
+  * without that node the stock kernel never feeds it, and an armed watchdog would reset every stock
+  * boot 21.47 s in, a loop back to this rung. Hence the DTB is read before the kernel and ramdisk.
++ * In both steps: Step 2's stock order boots the stock firmware here too.
+  */
+ static bool nova_stock_dtb_wdt(const void *dtb)
+ {
+@@ -1712,7 +1782,7 @@ static bool nova_stock_dtb_wdt(const void *dtb)
+ 	return !status || !strcmp(status, "okay") || !strcmp(status, "ok");
+ }
+ 
+-static void nova_boot_stock(struct blk_desc *desc)
++static void nova_boot_stock(struct blk_desc *desc, lbaint_t lba, bool recovery)
+ {
+ 	ulong saddr = env_get_hex("scratch_addr_r", 0), caddr = env_get_hex("kernel_comp_addr_r", 0);
+ 	ulong faddr = env_get_hex("fdt_addr_r", 0);
+@@ -1750,7 +1820,7 @@ static void nova_boot_stock(struct blk_desc *desc)
+ 		nlog("stock firmware: the stock DTB has no enabled watchdog@ff848000, so the stock kernel would not "
+ 		     "feed one: the watchdog %s", nova_wdog_armed ? "counting (a kexec entry's)" : "left off");
+ 	}
+-	rlen = nova_krnl(desc, CONFIG_NOVA_BACKUP_LBA, s, STOCK_RAMDISK_MAX, "stock ramdisk (backup)");
++	rlen = nova_krnl(desc, lba, s, STOCK_RAMDISK_MAX, "stock ramdisk");
+ 	if (!rlen)
+ 		goto out;
+ 	memmove(map_sysmem(STOCK_RAMDISK_AT, rlen), s + KRNL_HDR, rlen);
+@@ -1767,6 +1837,10 @@ static void nova_boot_stock(struct blk_desc *desc)
+ 		nlog("PARM: no CMDLINE (%d)", ret);
+ 		goto out;
+ 	}
++#if IS_ENABLED(CONFIG_NOVA_RK3399_MAINLINE)
++	if (recovery && nova_parm_recovery(parm, line, NOVA_CMDLINE_MAX) >= 0)
++		strcpy(parm, line);
++#endif
+ 	if (nova_stock_cmdline(nova_dtb_bootargs(dtb), parm, nova_x0_line, line, NOVA_CMDLINE_MAX) < 0) {
+ 		nlog("stock: the command line does not fit");
+ 		goto out;
+@@ -1782,6 +1856,7 @@ out:
+ 	free(parm);
+ }
+ 
++#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
+ /*
+  * Handed a slot by the committed U-Boot (CHAIN_PROP in /chosen of x0): boot that chain image's FIT
+  * with the command line it passed, nothing else. The record, the reboot flag and the watchdog are
+@@ -1804,6 +1879,7 @@ static void __noreturn nova_chained(struct blk_desc *desc, lbaint_t lba)
+ 	nlog("the handed slot did not boot: a reset (the committed U-Boot counts it)");
+ 	nova_reset();
+ }
++#endif
+ 
+ 
+ /* ------------------------------------------------------------------ the GIC's LPI tables */
+@@ -1834,7 +1910,7 @@ static struct {
+ 	u64 pend[NOVA_GICR_MAX];
+ } nova_lpi;
+ 
+-static void nova_lpi_scan(void)
++static __maybe_unused void nova_lpi_scan(void)
+ {
+ 	char line[NOVA_GICR_MAX * 40 + 1] = "";
+ 	int i, k = 0;
+@@ -1928,6 +2004,82 @@ void board_quiesce_devices(void)
+ 	nlog("handoff: starting the kernel");
+ }
+ 
++/* ------------------------------------------------------------------ the ladder */
++
++/*
++ * The ladder (nova_chain.c) over this card: the committed image in recovery, a trial in the slot, the
++ * copy, an installed NovaOS in backup, then the stock firmware. The record is what OS_REG1 held at
++ * entry; card->wdog is set. Never returns.
++ */
++static void __noreturn nova_ladder(struct blk_desc *desc, struct nova_card *card)
++{
++	struct nova_img r = { .name = "recovery", .lba = CONFIG_NOVA_RECOVERY_LBA };
++	struct nova_img s = { .name = "slot", .lba = CONFIG_NOVA_SLOT_LBA };
++	struct nova_img b = { .name = "backup", .lba = CONFIG_NOVA_BACKUP_LBA };
++	struct nova_step st;
++	enum nova_mode mode;
++	enum nova_rec_kind kind;
++	struct nova_img *x;
++	void *dtb;
++	u32 rec = nova_os_reg1_at_entry;
++	int len, pos;
++	u8 tag;
++
++	nova_img_read(desc, &r);
++	nova_img_read(desc, &s);
++	nova_img_read(desc, &b);
++	card->r_ok = r.android && r.chain;
++	card->r_tag = r.android ? r.hdr[BOOT_ID_OFF] : 0;
++	card->s_ok = s.android;
++	card->s_tag = s.android ? s.hdr[BOOT_ID_OFF] : 0;
++	card->s_same = r.android && s.android && !memcmp(r.hdr + BOOT_ID_OFF, s.hdr + BOOT_ID_OFF, BOOT_ID_LEN);
++	card->b_android = b.android;
++	card->backup_krnl = nova_head_is(desc, CONFIG_NOVA_BACKUP_LBA, "KRNL", "backup head");
++	card->boot_krnl = nova_head_is(desc, CONFIG_NOVA_BOOT_LBA, "KRNL", "boot head");
++	if (r.android) {
++		dtb = nova_second_dtb(desc, &r, true);
++		nova_r_dtb = nova_strdup(dtb ? nova_dtb_bootargs(dtb) : NULL);
++	}
++
++	mode = nova_ladder_mode(rec, card, &pos);
++	nlog("record %08x%s: mode %s from position %d; recovery %s, slot %s%s, backup %s, boot %s, watchdog %s",
++	     rec, nova_rec_parse(rec, &kind, &len, &tag) ? "" : " (none)", nova_mode_name(mode), pos,
++	     card->r_ok ? "a chain image" : "NOT a chain image", card->s_ok ? "an image" : "empty",
++	     card->s_same ? " (recovery's)" : "", b.android ? "ANDROID!" : card->backup_krnl ? "stock" : "neither",
++	     card->boot_krnl ? "stock" : "not stock", card->wdog ? "counting" : "off");
++
++	if (mode == NOVA_MODE_STOCK) {
++		writel(0, PMUGRF_OS_REG1);
++		nova_boot_stock(desc, CONFIG_NOVA_BACKUP_LBA, false);
++		nova_loader("the stock firmware could not be loaded from backup, kernel and resource");
++	}
++	while (nova_ladder_step(mode, pos, card, &st)) {
++		if (st.rung == NOVA_RUNG_STOCK)
++			nova_go_stock(card);
++		writel(st.rec, PMUGRF_OS_REG1);
++		if (readl(PMUGRF_OS_REG1) != st.rec) {
++			nlog("OS_REG1 reads %08x, not the record %08x: attempts are not counted", readl(PMUGRF_OS_REG1),
++			     st.rec);
++			if (mode != NOVA_MODE_COMMITTED) {
++				mode = NOVA_MODE_COMMITTED;
++				pos = 0;
++				continue;
++			}
++		}
++		if (st.flag_recovery)
++			writel(FLAG_RECOVERY, PMUGRF_OS_REG0);
++		x = st.rung == NOVA_RUNG_RECOVERY ? &r : st.rung == NOVA_RUNG_SLOT ? &s : &b;
++		nlog("attempt: %s from %s, %d of %d (position %d), record %08x%s", nova_role_name(st.role), x->name,
++		     st.attempt, st.of, st.pos, st.rec, st.flag_recovery ? ", reboot flag recovery" : "");
++		/* recovery is the chainload's own image; in Step 2 no image is this U-Boot's own */
++		nova_attempt(desc, x, &st, IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD) && x == &r);
++		nlog("%s did not boot: the next phase (position %d)", x->name, st.next_phase);
++		pos = st.next_phase;
++	}
++	nova_go_stock(card);
++}
++
++#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
+ /* ------------------------------------------------------------------ Step 1 through kexec */
+ 
+ /*
+@@ -2109,7 +2261,7 @@ static void __noreturn nova_bench_boot(const void *x0)
+ 			nlog("bench stock: backup holds no stock boot image: a plain reset");
+ 			nova_reset();
+ 		}
+-		nova_boot_stock(desc);
++		nova_boot_stock(desc, CONFIG_NOVA_BACKUP_LBA, false);
+ 		nlog("bench stock: the stock firmware was not booted: a plain reset");
+ 		nova_reset();
+ 	}
+@@ -2138,22 +2290,12 @@ static void __noreturn nova_bench_boot(const void *x0)
+ 
+ static int do_boot(void)
+ {
+-	struct nova_img r = { .name = "recovery", .lba = CONFIG_NOVA_RECOVERY_LBA };
+-	struct nova_img s = { .name = "slot", .lba = CONFIG_NOVA_SLOT_LBA };
+-	struct nova_img b = { .name = "backup", .lba = CONFIG_NOVA_BACKUP_LBA };
+ 	const void *x0 = prev_fdt();
+ 	struct nova_card card = { };
+-	struct nova_step st;
+ 	struct blk_desc *desc;
+-	enum nova_mode mode;
+-	enum nova_rec_kind kind;
+-	struct nova_img *x;
+ 	const char *line = NULL;
+-	void *dtb;
+-	u32 rec = nova_os_reg1_at_entry;
+ 	u64 chain_lba = 0;
+-	int node, len, pos;
+-	u8 tag;
++	int node, len;
+ 
+ 	nova_entered();
+ 	nova_caches_report();
+@@ -2183,61 +2325,200 @@ static int do_boot(void)
+ 	}
+ 	if (!desc)
+ 		nova_loader("the card cannot be read");
++	nova_ladder(desc, &card);
++}
++#endif /* CONFIG_NOVA_RK3399_CHAINLOAD */
+ 
+-	nova_img_read(desc, &r);
+-	nova_img_read(desc, &s);
+-	nova_img_read(desc, &b);
+-	card.r_ok = r.android && r.chain;
+-	card.r_tag = r.android ? r.hdr[BOOT_ID_OFF] : 0;
+-	card.s_ok = s.android;
+-	card.s_tag = s.android ? s.hdr[BOOT_ID_OFF] : 0;
+-	card.s_same = r.android && s.android && !memcmp(r.hdr + BOOT_ID_OFF, s.hdr + BOOT_ID_OFF, BOOT_ID_LEN);
+-	card.b_android = b.android;
+-	card.backup_krnl = nova_head_is(desc, CONFIG_NOVA_BACKUP_LBA, "KRNL", "backup head");
+-	card.boot_krnl = nova_head_is(desc, CONFIG_NOVA_BOOT_LBA, "KRNL", "boot head");
+-	if (r.android) {
+-		dtb = nova_second_dtb(desc, &r, true);
+-		nova_r_dtb = nova_strdup(dtb ? nova_dtb_bootargs(dtb) : NULL);
++#if IS_ENABLED(CONFIG_NOVA_RK3399_MAINLINE)
++/* ------------------------------------------------------------------ Step 2: the loader's duties */
++
++/*
++ * Run/Stop at power-on: every frame the front panel sent since SPL opened UART0 (they wait in its
++ * 64-byte receive FIFO), then on until CONFIG_NOVA_RUNSTOP_WINDOW_MS after that open; a press or
++ * release anywhere in the stream counts, other keys' frames are skipped. The open is timed by SPL
++ * (nova_uart0_opened_at); without that record the whole window runs from now.
++ */
++static bool nova_runstop_seen(void)
++{
++	struct nova_rx rx = { };
++	bool known;
++	u64 opened = 0, now, wait, t0;
++	int c;
++
++	known = nova_uart0_opened_at(&opened);
++	if (!nova_uart0_is_open()) {
++		nova_uart0_open();
++		known = false;
++	}
++	now = timer_get_boot_us();
++	wait = nova_runstop_wait_us(known, opened, now, CONFIG_NOVA_RUNSTOP_WINDOW_MS);
++	if (known)
++		nlog("runstop: UART0 opened by SPL at %lluus, now %lluus: listening %lluus more (window %d ms)",
++		     (unsigned long long)opened, (unsigned long long)now, (unsigned long long)wait,
++		     CONFIG_NOVA_RUNSTOP_WINDOW_MS);
++	else
++		nlog("runstop: no record of SPL's UART0 open (now %lluus): listening the whole %d ms",
++		     (unsigned long long)now, CONFIG_NOVA_RUNSTOP_WINDOW_MS);
++	t0 = nova_us();
++	for (;;) {
++		while ((c = nova_uart0_getc()) >= 0)
++			if (nova_rx_runstop(&rx, c))
++				return true;
++		if (nova_us() - t0 >= wait)
++			return false;
++		udelay(50);
+ 	}
++}
+ 
+-	mode = nova_ladder_mode(rec, &card, &pos);
+-	nlog("record %08x%s: mode %s from position %d; recovery %s, slot %s%s, backup %s, boot %s, watchdog %s",
+-	     rec, nova_rec_parse(rec, &kind, &len, &tag) ? "" : " (none)", nova_mode_name(mode), pos,
+-	     card.r_ok ? "a chain image" : "NOT a chain image", card.s_ok ? "an image" : "empty",
+-	     card.s_same ? " (recovery's)" : "", b.android ? "ANDROID!" : card.backup_krnl ? "stock" : "neither",
+-	     card.boot_krnl ? "stock" : "not stock", card.wdog ? "counting" : "off");
++/*
++ * Loader mode: Rockusb on OTG0, the rear USB device port, no timeout (the stock Loader's job). It
++ * serves the card's raw LBAs. Should it return, a plain reset (the flag is consumed: a normal boot
++ * follows). The record in OS_REG1 is left as it is, as the stock U-Boot leaves it. Never returns.
++ */
++static void __noreturn nova_loader_mode(const char *why)
++{
++	nlog("Loader mode (%s): Rockusb on the rear USB device port, no timeout", why);
++	pmsg_console();
++	run_command("rockusb 0 mmc 0", 0);
++	nlog("rockusb returned: a reset");
++	nova_reset();
++}
+ 
+-	if (mode == NOVA_MODE_STOCK) {
+-		writel(0, PMUGRF_OS_REG1);
+-		nova_boot_stock(desc);
+-		nova_loader("the stock firmware could not be loaded from backup, kernel and resource");
++/*
++ * The card's first PARM copy must be the table every LBA here comes from (NOVA_PARM_BYTES bytes,
++ * crc32 NOVA_PARM_CRC32); its CMDLINE, for a boot of `boot` and of `recovery`, into nova_parm_line
++ * and nova_parm_rec. 0, or -1.
++ */
++static int nova_parm_check(struct blk_desc *desc)
++{
++	u8 *b = memalign(ARCH_DMA_MINALIGN, 4 * SECTOR);
++	char *line = malloc(NOVA_CMDLINE_MAX), *rec = malloc(NOVA_CMDLINE_MAX);
++	u32 crc;
++	int ret = -1;
++
++	if (!b || !line || !rec || nova_read(desc, CONFIG_NOVA_PARM_LBA, 4, b, "PARM"))
++		goto out;
++	crc = crc32(0, b, CONFIG_NOVA_PARM_BYTES);
++	if (crc != CONFIG_NOVA_PARM_CRC32) {
++		nlog("PARM: %d bytes crc32 %08x, the committed table's is %08x", CONFIG_NOVA_PARM_BYTES, crc,
++		     CONFIG_NOVA_PARM_CRC32);
++		goto out;
+ 	}
+-	while (nova_ladder_step(mode, pos, &card, &st)) {
+-		if (st.rung == NOVA_RUNG_STOCK)
+-			nova_go_stock(&card);
+-		writel(st.rec, PMUGRF_OS_REG1);
+-		if (readl(PMUGRF_OS_REG1) != st.rec) {
+-			nlog("OS_REG1 reads %08x, not the record %08x: attempts are not counted", readl(PMUGRF_OS_REG1),
+-			     st.rec);
+-			if (mode != NOVA_MODE_COMMITTED) {
+-				mode = NOVA_MODE_COMMITTED;
+-				pos = 0;
+-				continue;
+-			}
++	if (nova_parm_cmdline(b, 4 * SECTOR, line, NOVA_CMDLINE_MAX) < 0 ||
++	    nova_parm_recovery(line, rec, NOVA_CMDLINE_MAX) < 0) {
++		nlog("PARM: no CMDLINE");
++		goto out;
++	}
++	nova_parm_line = line;
++	nova_parm_rec = rec;
++	line = rec = NULL;
++	ret = 0;
++out:
++	free(b);
++	free(line);
++	free(rec);
++	return ret;
++}
++
++/*
++ * The chain image the stock order reached: where the stock U-Boot would start the chainloaded
++ * U-Boot, so the watchdog is armed here (not for a record of kind STOCK) and the same ladder runs.
++ * Never returns.
++ */
++static void __noreturn nova_chain_from_card(struct blk_desc *desc)
++{
++	struct nova_card card = { };
++
++	if (!nova_rec_is_stock(nova_os_reg1_at_entry))
++		nova_wdog_arm();
++	card.wdog = nova_wdog_check();
++	bootstage_mark_name(BOOTSTAGE_ID_ALLOC, "nova_ladder");
++	nova_ladder(desc, &card);
++}
++
++/*
++ * One partition of the stock order: Rigol's Android from a KRNL container; a chain image of ours by
++ * the ladder (never returns); a plain NovaOS image held to its id, as the stock U-Boot boots one.
++ * Returns when nothing was booted.
++ */
++static void nova_stock_part(struct blk_desc *desc, enum nova_part part)
++{
++	lbaint_t lba = part == NOVA_PART_BOOT ? CONFIG_NOVA_BOOT_LBA :
++		       part == NOVA_PART_RECOVERY ? CONFIG_NOVA_RECOVERY_LBA : CONFIG_NOVA_BACKUP_LBA;
++	struct nova_img x = { .name = nova_part_name(part), .lba = lba };
++
++	nlog("stock order: %s (lba %lu)", x.name, (ulong)lba);
++	if (nova_head_is(desc, lba, "KRNL", x.name)) {
++		nova_boot_stock(desc, lba, part == NOVA_PART_RECOVERY);
++		nlog("%s: Rigol's Android did not start", x.name);
++		return;
++	}
++	nova_img_read(desc, &x);
++	if (x.android && x.chain)
++		nova_chain_from_card(desc);
++	if (x.android) {
++		nova_attempt(desc, &x, NULL, false);
++		nlog("%s: the NovaOS image did not start", x.name);
++	} else {
++		nlog("%s: bad image magic", x.name);
++	}
++	free(x.hdr);
++}
++
++/*
++ * Step 2's `nova boot`: the reboot flag (read at entry), Run/Stop and the power-on-mode frame on a
++ * normal boot, the card's PARM, the misc message at misc + 16 KiB on a normal boot, then the stock
++ * order (boot, recovery, backup; recovery first for the recovery flag), then Loader mode. Never
++ * returns.
++ */
++static int do_boot(void)
++{
++	enum nova_flag_mode mode = nova_flag_mode(nova_os_reg0_at_entry);
++	const char *why = "the reboot flag";
++	enum nova_part order[3];
++	struct blk_desc *desc;
++	u8 *b;
++	int i, n;
++
++	nova_entered();
++	nova_caches_report();
++	bootstage_mark_name(BOOTSTAGE_ID_ALLOC, "nova_boot");
++	nlog("reboot flag %08x: %s", nova_os_reg0_at_entry, nova_flag_mode_name(mode));
++	if (mode == NOVA_FLAG_NORMAL) {
++		if (nova_runstop_seen()) {
++			mode = NOVA_FLAG_LOADER;
++			why = "Run/Stop at power-on";
++		} else {
++			nova_uart0_send(nova_frame_power_mode_auto, sizeof(nova_frame_power_mode_auto));
++			nlog("power-on mode: auto, to the front panel");
+ 		}
+-		if (st.flag_recovery)
+-			writel(FLAG_RECOVERY, PMUGRF_OS_REG0);
+-		x = st.rung == NOVA_RUNG_RECOVERY ? &r : st.rung == NOVA_RUNG_SLOT ? &s : &b;
+-		nlog("attempt: %s from %s, %d of %d (position %d), record %08x%s", nova_role_name(st.role), x->name,
+-		     st.attempt, st.of, st.pos, st.rec, st.flag_recovery ? ", reboot flag recovery" : "");
+-		nova_attempt(desc, x, &st, x == &r);
+-		nlog("%s did not boot: the next phase (position %d)", x->name, st.next_phase);
+-		pos = st.next_phase;
++		bootstage_mark_name(BOOTSTAGE_ID_ALLOC, "nova_runstop_done");
+ 	}
+-	nova_go_stock(&card);
++	if (mode == NOVA_FLAG_LOADER)
++		nova_loader_mode(why);
++	desc = nova_card();
++	bootstage_mark_name(BOOTSTAGE_ID_ALLOC, "nova_mmc_ready");
++	if (!desc)
++		nova_loader_mode("the card cannot be read");
++	if (nova_parm_check(desc))
++		nova_loader_mode("the card's PARM is not the committed table");
++	if (mode == NOVA_FLAG_NORMAL) {
++		b = memalign(ARCH_DMA_MINALIGN, SECTOR);
++		if (b && !nova_read(desc, CONFIG_NOVA_MISC_BCB_LBA, 1, b, "misc + 16 KiB") &&
++		    nova_bcb_says_recovery(b, SECTOR)) {
++			nlog("misc + 16 KiB: boot-recovery");
++			mode = NOVA_FLAG_RECOVERY;
++		}
++		free(b);
++	}
++	n = nova_stock_order(mode, order);
++	for (i = 0; i < n; i++)
++		nova_stock_part(desc, order[i]);
++	nova_loader_mode("nothing on the card boots");
+ }
++#endif /* CONFIG_NOVA_RK3399_MAINLINE */
+ 
+-#endif /* CONFIG_NOVA_RK3399_CHAINLOAD */
++#endif /* CONFIG_NOVA_RK3399_LADDER */
+ 
+ /* ------------------------------------------------------------------ the command */
+ 
+@@ -2260,14 +2541,18 @@ static int do_nova(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[]
+ 	if (!strcmp(argv[1], "kexec-test"))
+ 		return do_kexec_test();
+ #endif
+-#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
++#if IS_ENABLED(CONFIG_NOVA_RK3399_LADDER)
+ 	if (!strcmp(argv[1], "boot"))
+ 		return do_boot();
+ #endif
+ 	return CMD_RET_USAGE;
+ }
+ 
+-#if IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
++#if IS_ENABLED(CONFIG_NOVA_RK3399_MAINLINE)
++#define NOVA_FLAVOR_HELP \
++	"nova boot         - the loader's duties, then boot, recovery and backup in the stock order\n" \
++	"                    (a chain image by the chain's ladder), then Loader mode\n"
++#elif IS_ENABLED(CONFIG_NOVA_RK3399_CHAINLOAD)
+ #define NOVA_FLAVOR_HELP \
+ 	"nova boot         - boot NovaOS by the chain's ladder (the committed image, a trial, its\n" \
+ 	"                    copy), then the stock firmware\n"
+@@ -2286,11 +2571,11 @@ U_BOOT_CMD(nova, 16, 0, do_nova,
+ /* ------------------------------------------------------------------ board hooks */
+ 
+ /*
+- * The stock BL32 (OP-TEE 1.1.0) stays resident in both flavors: cut its range out of the
+- * DRAM banks, as the /memory node the stock boot loader gives the kernel leaves it out,
+- * so neither U-Boot's allocator nor the kernel's /memory reaches it. Bank 0 starts at 2 MiB
+- * (sdram.c: BL31) and ends at SDRAM_MAX_SIZE; the result is the stock /memory exactly:
+- * 0x200000 + 0x8200000 and 0xa200000 + 0xede00000.
++ * The stock BL32 (OP-TEE 1.1.0) stays resident under the stock loaders (the kexec test and the
++ * chainload): cut its range out of the DRAM banks, as the /memory node the stock boot loader gives
++ * the kernel leaves it out, so neither U-Boot's allocator nor the kernel's /memory reaches it. Bank 0
++ * starts at 2 MiB (sdram.c: BL31) and ends at SDRAM_MAX_SIZE; the result is the stock /memory
++ * exactly: 0x200000 + 0x8200000 and 0xa200000 + 0xede00000. Step 2 runs no BL32: all of it is RAM.
+  */
+ int rockchip_dram_init_banksize_fixup(struct bd_info *bd)
+ {
+@@ -2298,7 +2583,7 @@ int rockchip_dram_init_banksize_fixup(struct bd_info *bd)
+ 	const phys_addr_t hole_end = hole + CONFIG_NOVA_TRUST_OS_SIZE;
+ 	phys_addr_t end = gd->dram[0].start + gd->dram[0].size;
+ 
+-	if (CONFIG_NR_DRAM_BANKS < 2 || gd->dram[1].size ||
++	if (IS_ENABLED(CONFIG_NOVA_RK3399_MAINLINE) || CONFIG_NR_DRAM_BANKS < 2 || gd->dram[1].size ||
+ 	    gd->dram[0].start >= hole || end <= hole_end)
+ 		return 0;
+ 	gd->dram[1].start = hole_end;
+diff --git a/board/rigol/nova_rk3399/nova_stock.c b/board/rigol/nova_rk3399/nova_stock.c
+new file mode 100644
+index 00000000..389beff3
+--- /dev/null
++++ b/board/rigol/nova_rk3399/nova_stock.c
+@@ -0,0 +1,122 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Rigol DHO800/DHO900 and MHO900 (RK3399): what the scope's systems expect of their loader
++ * (nova_stock.h).
++ *
++ * Copyright (C) 2026 Olympian LED, Inc.
++ */
++
++#ifdef __UBOOT__
++#include <linux/string.h>
++#else
++#include <string.h>
++#endif
++#include "nova_stock.h"
++
++#ifndef ARRAY_SIZE
++#define ARRAY_SIZE(a)	(sizeof(a) / sizeof((a)[0]))
++#endif
++
++enum nova_flag_mode nova_flag_mode(u32 v)
++{
++	if (v == NOVA_FLAG_LOADER_ERROR)
++		return NOVA_FLAG_LOADER;
++	/* the consumed form 0xc35242xx, zero, and anything unknown: normal */
++	if ((v & ~0xffu) != NOVA_FLAG_REBOOT)
++		return NOVA_FLAG_NORMAL;
++	switch (v & 0xffu) {
++	case 0x01:
++		return NOVA_FLAG_LOADER;
++	case 0x03:
++		return NOVA_FLAG_RECOVERY;
++	default:
++		return NOVA_FLAG_NORMAL;
++	}
++}
++
++const char *nova_flag_mode_name(enum nova_flag_mode mode)
++{
++	static const char *const names[] = { "normal", "loader", "recovery" };
++
++	return (unsigned int)mode < ARRAY_SIZE(names) ? names[mode] : "?";
++}
++
++/* Front-panel frames: FA b1 b2 crc AF, crc the CRC-7/MMC of b1 and b2. */
++const u8 nova_frame_runstop_press[5] = { 0xfa, 0x08, 0x0c, 0x34, 0xaf };
++const u8 nova_frame_runstop_release[5] = { 0xfa, 0x08, 0x00, 0x58, 0xaf };
++const u8 nova_frame_power_mode_auto[5] = { 0xfa, 0x05, 0x05, 0x0a, 0xaf };
++
++bool nova_rx_runstop(struct nova_rx *rx, u8 byte)
++{
++	memmove(rx->w, rx->w + 1, sizeof(rx->w) - 1);
++	rx->w[sizeof(rx->w) - 1] = byte;
++	if (rx->n < sizeof(rx->w))
++		rx->n++;
++	return rx->n == sizeof(rx->w) &&
++	       (!memcmp(rx->w, nova_frame_runstop_press, sizeof(rx->w)) ||
++		!memcmp(rx->w, nova_frame_runstop_release, sizeof(rx->w)));
++}
++
++u64 nova_runstop_wait_us(bool known, u64 opened_us, u64 now_us, u32 window_ms)
++{
++	u64 window = (u64)window_ms * 1000;
++
++	if (!known || now_us < opened_us)
++		return window;
++	return now_us - opened_us >= window ? 0 : window - (now_us - opened_us);
++}
++
++bool nova_bcb_says_recovery(const u8 *msg, size_t n)
++{
++	static const char cmd[] = "boot-recovery";
++
++	/* the command field is 32 bytes, the text NUL-terminated within them */
++	return n >= 32 && !memcmp(msg, cmd, sizeof(cmd));
++}
++
++int nova_stock_order(enum nova_flag_mode mode, enum nova_part *out)
++{
++	int n = 0;
++
++	switch (mode) {
++	case NOVA_FLAG_NORMAL:
++		out[n++] = NOVA_PART_BOOT;
++		/* fall through */
++	case NOVA_FLAG_RECOVERY:
++		out[n++] = NOVA_PART_RECOVERY;
++		out[n++] = NOVA_PART_BACKUP;
++		break;
++	case NOVA_FLAG_LOADER:
++		break;
++	}
++	return n;
++}
++
++const char *nova_part_name(enum nova_part part)
++{
++	static const char *const names[] = { "boot", "recovery", "backup" };
++
++	return (unsigned int)part < ARRAY_SIZE(names) ? names[part] : "?";
++}
++
++int nova_parm_recovery(const char *parm, char *out, size_t outlen)
++{
++	static const char key[] = "mtdparts=rk29xxnand:";
++	static const char first[] = "0x00002000@0x00000000(parameter),";
++	const char *at = strstr(parm, key);
++	size_t head, len = strlen(parm);
++
++	if (!at) {
++		if (len + 1 > outlen)
++			return -1;
++		memcpy(out, parm, len + 1);
++		return (int)len;
++	}
++	head = at - parm + sizeof(key) - 1;
++	if (len + sizeof(first) > outlen)
++		return -1;
++	memcpy(out, parm, head);
++	memcpy(out + head, first, sizeof(first) - 1);
++	memcpy(out + head + sizeof(first) - 1, parm + head, len - head + 1);
++	return (int)(len + sizeof(first) - 1);
++}
+diff --git a/board/rigol/nova_rk3399/nova_stock.h b/board/rigol/nova_rk3399/nova_stock.h
+new file mode 100644
+index 00000000..5c383ac8
+--- /dev/null
++++ b/board/rigol/nova_rk3399/nova_stock.h
+@@ -0,0 +1,100 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Rigol DHO800/DHO900 and MHO900 (RK3399): what the scope's systems expect of the loader that
++ * starts them, as pure logic with no hardware access, for the U-Boot proper that SPL loads from the
++ * card (NOVA_RK3399_MAINLINE): the reboot flag, the front-panel controller's frames, the misc
++ * message, the order the stock boot partitions are tried in, and the partition table's command
++ * line on a recovery boot. board/rigol/nova_rk3399/nova_rk3399.c does the reads and writes; a host
++ * program builds this file alone to test it.
++ *
++ * Copyright (C) 2026 Olympian LED, Inc.
++ *
++ * THE REBOOT FLAG: PMUGRF OS_REG0 holds 0x5242c3xx after a Linux reboot that names a mode (the
++ * kernel's reboot-mode node writes it), or 0x1888aaff after an interrupted Rockusb sector write.
++ *
++ *   low byte 1 (mode-loader, mode-bootloader)  Loader (Rockusb), no timeout
++ *   low byte 3 (mode-recovery)                 boot `recovery` first
++ *   0x1888aaff (loader error)                  Loader
++ *   anything else                              a normal boot
++ *
++ * Low bytes 6 and 7 ask the stock firmware for a data wipe (its recovery with --wipe_data). This
++ * loader never acts on them: they are a normal boot, and nothing here writes misc.
++ */
++#ifndef __NOVA_STOCK_H
++#define __NOVA_STOCK_H
++
++#ifdef __UBOOT__
++#include <linux/types.h>
++#else
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++typedef uint8_t u8;
++typedef uint32_t u32;
++typedef uint64_t u64;
++#endif
++
++#define NOVA_FLAG_REBOOT	0x5242c300u
++#define NOVA_FLAG_LOADER_ERROR	0x1888aaffu
++
++enum nova_flag_mode {
++	NOVA_FLAG_NORMAL,
++	NOVA_FLAG_LOADER,
++	NOVA_FLAG_RECOVERY,
++};
++
++/* What the reboot flag in OS_REG0 asks for (the table above). */
++enum nova_flag_mode nova_flag_mode(u32 os_reg0);
++const char *nova_flag_mode_name(enum nova_flag_mode mode);
++
++/*
++ * The front-panel controller on UART0 (1,500,000 baud, 8N1): frames FA b1 b2 crc AF, crc the
++ * CRC-7/MMC of b1 and b2. Run/Stop pressed or released (slot 8, key 0x0c or 0x00) at power-on
++ * enters Loader mode; on every other normal boot the loader tells the controller the power-on
++ * mode (auto: no vendor setting for manual is read here).
++ */
++extern const u8 nova_frame_runstop_press[5];
++extern const u8 nova_frame_runstop_release[5];
++extern const u8 nova_frame_power_mode_auto[5];
++
++/* The last five bytes received: a window over the stream, any alignment. */
++struct nova_rx {
++	u8 w[5];
++	u8 n;
++};
++
++/* One byte more of the stream: true when the last five are a Run/Stop press or release. */
++bool nova_rx_runstop(struct nova_rx *rx, u8 byte);
++
++/*
++ * How much longer to listen for Run/Stop, in us: the window runs from when SPL opened UART0
++ * (opened_us on the boot counter, `known` false when SPL left no record of it) to opened_us +
++ * window_ms. A counter that reads less now than at the open (restarted in between) counts as
++ * unknown. Unknown: the whole window, from now.
++ */
++u64 nova_runstop_wait_us(bool known, u64 opened_us, u64 now_us, u32 window_ms);
++
++/*
++ * The misc partition's bootloader message, read at misc + 16 KiB only (its first 32 bytes, the
++ * command): true when it is boot-recovery. Offset 0 is never read.
++ */
++bool nova_bcb_says_recovery(const u8 *msg, size_t n);
++
++/* The stock boot partitions, in the order the reboot flag's mode tries them (then Loader). */
++enum nova_part {
++	NOVA_PART_BOOT,
++	NOVA_PART_RECOVERY,
++	NOVA_PART_BACKUP,
++};
++
++/* The partitions `mode` tries, in order, into `out` (room for 3); their number. */
++int nova_stock_order(enum nova_flag_mode mode, enum nova_part *out);
++const char *nova_part_name(enum nova_part part);
++
++/*
++ * The partition table's command line as the stock loader passes it on a boot of `recovery`: the
++ * parameter partition first in its mtdparts list. Its length, or -1 when it does not fit.
++ */
++int nova_parm_recovery(const char *parm, char *out, size_t outlen);
++
++#endif
+diff --git a/board/rigol/nova_rk3399/nova_uart0.c b/board/rigol/nova_rk3399/nova_uart0.c
+new file mode 100644
+index 00000000..64cab291
+--- /dev/null
++++ b/board/rigol/nova_rk3399/nova_uart0.c
+@@ -0,0 +1,166 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Rigol DHO800/DHO900 and MHO900 (RK3399): UART0 to the front-panel controller (nova_uart0.h).
++ *
++ * Copyright (C) 2026 Olympian LED, Inc.
++ *
++ * Its pins are GPIO2_C0/C1 only: GPIO2_C2 (UART0 CTS) is PCIe PERST# on the DHO and the AFG receive
++ * line on a rev-1 MHO, and is never touched. The controller's frames and baud rate are its own
++ * interface.
++ */
++
++#include <bootstage.h>
++#include <cpu_func.h>
++#include <mapmem.h>
++#include <time.h>
++#include <asm/cache.h>
++#include <asm/io.h>
++#include <asm/arch-rockchip/cru_rk3399.h>
++#include <asm/arch-rockchip/grf_rk3399.h>
++#include <asm/arch-rockchip/hardware.h>
++#include <linux/delay.h>
++#include <linux/string.h>
++#include "nova_uart0.h"
++
++/* Register blocks (rk3399-base.dtsi; GRF as in mach-rockchip/rk3399/rk3399.c). */
++#define RK3399_CRU_BASE		0xff760000
++#define RK3399_GRF_BASE		0xff770000
++#define NOVA_UART0_BASE		0xff180000	/* uart0: serial@ff180000 */
++
++/*
++ * DesignWare APB UART, 32-bit registers (reg-shift 2). SRR (0x88) and SFE (0x98) are DesignWare
++ * additions to the 16550 set: SRR resets the UART and its FIFOs, SFE turns the FIFOs on.
++ */
++#define UART_RBR		0x00
++#define UART_THR		0x00
++#define UART_DLL		0x00
++#define UART_DLH		0x04
++#define UART_IER		0x04
++#define UART_LCR		0x0c
++#define UART_LSR		0x14
++#define UART_SRR		0x88
++#define UART_SFE		0x98
++
++#define UART_LCR_8N1		0x03
++#define UART_LCR_DLAB		0x80
++#define UART_LSR_DR		0x01
++#define UART_LSR_THRE		0x20
++#define UART_LSR_TEMT		0x40
++#define UART_SRR_ALL		0x07	/* UART, receive FIFO and transmit FIFO reset */
++
++/*
++ * CRU, as Linux's drivers/clk/rockchip/clk-rk3399.c describes it: clk_uart0 is a mux in
++ * CLKSEL_CON33 bits [9:8] of {clk_uart0_div, clk_uart0_frac, xin24m}; pclk_uart0's gate is
++ * CLKGATE_CON22 bit 0.
++ */
++#define CRU_UART0_SEL_SHIFT	8
++#define CRU_UART0_SEL_MASK	(3 << CRU_UART0_SEL_SHIFT)
++#define CRU_UART0_SEL_XIN24M	(2 << CRU_UART0_SEL_SHIFT)
++#define CRU_PCLK_UART0_GATE	(1 << 0)
++
++/* 24 MHz / (16 x 1,500,000) = 1: the front-panel controller's 1,500,000 baud. */
++#define UART0_DIVISOR		1
++
++/* What SPL leaves for U-Boot proper at CONFIG_NOVA_SPL_HANDOFF_ADDR: when it opened UART0. */
++#define NOVA_HANDOFF_MAGIC	0x304f554eu	/* "NUO0" */
++
++struct nova_handoff {
++	u32 magic;
++	u32 check;		/* ~magic ^ the two halves of `us` */
++	u64 us;			/* the boot counter (timer_get_boot_us()) at the open */
++};
++
++static u32 nova_handoff_check(u64 us)
++{
++	return ~NOVA_HANDOFF_MAGIC ^ (u32)us ^ (u32)(us >> 32);
++}
++
++void nova_uart0_open(void)
++{
++	struct rockchip_cru *cru = (void *)RK3399_CRU_BASE;
++	struct rk3399_grf_regs *grf = (void *)RK3399_GRF_BASE;
++	void __iomem *uart = (void __iomem *)NOVA_UART0_BASE;
++
++	rk_clrsetreg(&cru->clksel_con[33], CRU_UART0_SEL_MASK, CRU_UART0_SEL_XIN24M);
++	rk_clrreg(&cru->clkgate_con[22], CRU_PCLK_UART0_GATE);
++	rk_clrsetreg(&grf->gpio2c_iomux,
++		     GRF_GPIO2C0_SEL_MASK | GRF_GPIO2C1_SEL_MASK,
++		     GRF_UART0BT_SIN << GRF_GPIO2C0_SEL_SHIFT |
++		     GRF_UART0BT_SOUT << GRF_GPIO2C1_SEL_SHIFT);
++
++	writel(UART_SRR_ALL, uart + UART_SRR);
++	udelay(10);
++	writel(0, uart + UART_IER);
++	writel(UART_LCR_DLAB | UART_LCR_8N1, uart + UART_LCR);
++	writel(UART0_DIVISOR & 0xff, uart + UART_DLL);
++	writel(UART0_DIVISOR >> 8, uart + UART_DLH);
++	writel(UART_LCR_8N1, uart + UART_LCR);
++	writel(1, uart + UART_SFE);	/* FIFOs on */
++}
++
++#if defined(CONFIG_XPL_BUILD)
++#if !defined(CONFIG_TPL_BUILD)
++/*
++ * Called by spl_board_init() (mach-rockchip/rk3399/rk3399.c), in SPL only, before it loads U-Boot
++ * proper: UART0 opened, and the moment recorded for U-Boot proper's Run/Stop window. SPL cleans
++ * the D-cache before it leaves for BL31.
++ */
++void led_setup(void)
++{
++	struct nova_handoff *h = (void *)CONFIG_NOVA_SPL_HANDOFF_ADDR;
++	u64 us;
++
++	nova_uart0_open();
++	us = timer_get_boot_us();
++	h->us = us;
++	h->check = nova_handoff_check(us);
++	h->magic = NOVA_HANDOFF_MAGIC;
++}
++#endif
++#else /* U-Boot proper */
++
++bool nova_uart0_is_open(void)
++{
++	void __iomem *uart = (void __iomem *)NOVA_UART0_BASE;
++
++	return (readl(uart + UART_SFE) & 1) && (readl(uart + UART_LCR) & 0xff) == UART_LCR_8N1;
++}
++
++int nova_uart0_getc(void)
++{
++	void __iomem *uart = (void __iomem *)NOVA_UART0_BASE;
++
++	if (!(readl(uart + UART_LSR) & UART_LSR_DR))
++		return -1;
++	return readl(uart + UART_RBR) & 0xff;
++}
++
++void nova_uart0_send(const u8 *buf, int len)
++{
++	void __iomem *uart = (void __iomem *)NOVA_UART0_BASE;
++	ulong start = get_timer(0);
++	int i;
++
++	for (i = 0; i < len; i++) {
++		while (!(readl(uart + UART_LSR) & UART_LSR_THRE))
++			if (get_timer(start) > 10)
++				return;
++		writel(buf[i], uart + UART_THR);
++	}
++	while (!(readl(uart + UART_LSR) & UART_LSR_TEMT))
++		if (get_timer(start) > 10)
++			return;
++}
++
++bool nova_uart0_opened_at(u64 *us)
++{
++	struct nova_handoff *h = map_sysmem(CONFIG_NOVA_SPL_HANDOFF_ADDR, sizeof(*h));
++	bool ok = h->magic == NOVA_HANDOFF_MAGIC && h->check == nova_handoff_check(h->us);
++
++	if (ok)
++		*us = h->us;
++	memset(h, 0, sizeof(*h));
++	flush_dcache_range(CONFIG_NOVA_SPL_HANDOFF_ADDR, CONFIG_NOVA_SPL_HANDOFF_ADDR + ARCH_DMA_MINALIGN);
++	return ok;
++}
++#endif
+diff --git a/board/rigol/nova_rk3399/nova_uart0.h b/board/rigol/nova_rk3399/nova_uart0.h
+new file mode 100644
+index 00000000..410b4743
+--- /dev/null
++++ b/board/rigol/nova_rk3399/nova_uart0.h
+@@ -0,0 +1,28 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Rigol DHO800/DHO900 and MHO900 (RK3399): UART0, the line to the front-panel controller
++ * (1,500,000 baud, 8N1), driven by its registers: SPL opens it before it loads U-Boot proper, so
++ * every frame the controller sends from then on waits in the receive FIFO for U-Boot proper.
++ *
++ * Copyright (C) 2026 Olympian LED, Inc.
++ */
++#ifndef __NOVA_UART0_H
++#define __NOVA_UART0_H
++
++#include <linux/types.h>
++
++/* Clock xin24m, the pins GPIO2_C0/C1 only, the UART and its FIFOs reset, 1,500,000 8N1, FIFOs on. */
++void nova_uart0_open(void);
++/* Set up as nova_uart0_open() leaves it. */
++bool nova_uart0_is_open(void);
++/* The next byte received, or -1. */
++int nova_uart0_getc(void);
++/* Exactly `len` bytes out, within 10 ms. */
++void nova_uart0_send(const u8 *buf, int len);
++/*
++ * When SPL opened UART0, on the boot counter (us), from the record it left in DRAM
++ * (CONFIG_NOVA_SPL_HANDOFF_ADDR); false when there is none. The record is cleared.
++ */
++bool nova_uart0_opened_at(u64 *us);
++
++#endif
+diff --git a/configs/nova-dho900-rk3399_defconfig b/configs/nova-dho900-rk3399_defconfig
+index 295a9666..206ef25f 100644
+--- a/configs/nova-dho900-rk3399_defconfig
++++ b/configs/nova-dho900-rk3399_defconfig
+@@ -7,7 +7,7 @@ CONFIG_NR_DRAM_BANKS=2
+ CONFIG_DEFAULT_DEVICE_TREE="rk3399-nova-rigol-dho900"
+ CONFIG_ROCKCHIP_RK3399=y
+ # CONFIG_TPL is not set
+-# SPL is selected by ROCKCHIP_RK3399 but never built here (make u-boot.bin); a value its Kconfig needs.
++# SPL (selected by ROCKCHIP_RK3399) is built only with nova-mainline.config; a value its Kconfig needs.
+ CONFIG_SPL_BSS_MAX_SIZE=0x8000
+ CONFIG_TARGET_NOVA_RIGOL_RK3399=y
+ CONFIG_ROCKCHIP_BOOT_MODE_REG=0x0
+diff --git a/configs/nova-mho900-rk3399_defconfig b/configs/nova-mho900-rk3399_defconfig
+index 470138c9..24500c92 100644
+--- a/configs/nova-mho900-rk3399_defconfig
++++ b/configs/nova-mho900-rk3399_defconfig
+@@ -7,7 +7,7 @@ CONFIG_NR_DRAM_BANKS=2
+ CONFIG_DEFAULT_DEVICE_TREE="rk3399-nova-rigol-mho900"
+ CONFIG_ROCKCHIP_RK3399=y
+ # CONFIG_TPL is not set
+-# SPL is selected by ROCKCHIP_RK3399 but never built here (make u-boot.bin); a value its Kconfig needs.
++# SPL (selected by ROCKCHIP_RK3399) is built only with nova-mainline.config; a value its Kconfig needs.
+ CONFIG_SPL_BSS_MAX_SIZE=0x8000
+ CONFIG_TARGET_NOVA_RIGOL_RK3399=y
+ CONFIG_ROCKCHIP_BOOT_MODE_REG=0x0
